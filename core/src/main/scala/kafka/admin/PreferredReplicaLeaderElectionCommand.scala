@@ -21,9 +21,9 @@ import collection._
 import java.util.Properties
 import java.util.concurrent.ExecutionException
 
-import joptsimple.OptionSpecBuilder
 import kafka.common.AdminCommandFailedException
 import kafka.utils._
+import kafka.utils.Implicits._
 import kafka.zk.KafkaZkClient
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.apache.kafka.common.ElectionType
@@ -85,7 +85,7 @@ object PreferredReplicaLeaderElectionCommand extends Logging {
     }
   }
 
-  def parsePreferredReplicaElectionData(jsonString: String): immutable.Set[TopicPartition] = {
+  def parsePreferredReplicaElectionData(jsonString: String): collection.immutable.Set[TopicPartition] = {
     Json.parseFull(jsonString) match {
       case Some(js) =>
         js.asJsonObject.get("partitions") match {
@@ -128,11 +128,11 @@ object PreferredReplicaLeaderElectionCommand extends Logging {
       .describedAs("list of partitions for which preferred replica leader election needs to be triggered")
       .ofType(classOf[String])
 
-    private val zookeeperOptBuilder: OptionSpecBuilder = parser.accepts("zookeeper",
+    private val zookeeperOptBuilder = parser.accepts("zookeeper",
       "DEPRECATED. The connection string for the zookeeper connection in the " +
       "form host:port. Multiple URLS can be given to allow fail-over. " +
       "Replaced by --bootstrap-server, REQUIRED unless --bootstrap-server is given.")
-    private val bootstrapOptBuilder: OptionSpecBuilder = parser.accepts("bootstrap-server",
+    private val bootstrapOptBuilder = parser.accepts("bootstrap-server",
       "A hostname and port for the broker to connect to, " +
       "in the form host:port. Multiple comma-separated URLs can be given. REQUIRED unless --zookeeper is given.")
     parser.mutuallyExclusive(zookeeperOptBuilder, bootstrapOptBuilder)
@@ -269,7 +269,7 @@ object PreferredReplicaLeaderElectionCommand extends Logging {
 
       if (!failed.isEmpty) {
         val rootException = new AdminCommandFailedException(s"${failed.size} preferred replica(s) could not be elected")
-        failed.foreach { case (topicPartition, exception) =>
+        failed.forKeyValue { (topicPartition, exception) =>
           println(s"Error completing preferred leader election for partition: $topicPartition: $exception")
           rootException.addSuppressed(exception)
         }

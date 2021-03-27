@@ -156,9 +156,14 @@ public class ProducerConfig extends AbstractConfig {
 
     /** <code>max.block.ms</code> */
     public static final String MAX_BLOCK_MS_CONFIG = "max.block.ms";
-    private static final String MAX_BLOCK_MS_DOC = "The configuration controls how long <code>KafkaProducer.send()</code> and <code>KafkaProducer.partitionsFor()</code> will block."
-                                                    + "These methods can be blocked either because the buffer is full or metadata unavailable."
-                                                    + "Blocking in the user-supplied serializers or partitioner will not be counted against this timeout.";
+    private static final String MAX_BLOCK_MS_DOC = "The configuration controls how long the <code>KafkaProducer</code>'s <code>send()</code>, <code>partitionsFor()</code>, "
+                                                    + "<code>initTransactions()</code>, <code>sendOffsetsToTransaction()</code>, <code>commitTransaction()</code> "
+                                                    + "and <code>abortTransaction()</code> methods will block. "
+                                                    + "For <code>send()</code> this timeout bounds the total time waiting for both metadata fetch and buffer allocation "
+                                                    + "(blocking in the user-supplied serializers or partitioner is not counted against this timeout). "
+                                                    + "For <code>partitionsFor()</code> this timeout bounds the time spent waiting for metadata if it is unavailable. "
+                                                    + "The transaction-related methods always block, but may timeout if "
+                                                    + "the transaction coordinator could not be discovered or did not respond within the timeout.";
 
     /** <code>buffer.memory</code> */
     public static final String BUFFER_MEMORY_CONFIG = "buffer.memory";
@@ -344,7 +349,7 @@ public class ProducerConfig extends AbstractConfig {
                                 .define(METRICS_RECORDING_LEVEL_CONFIG,
                                         Type.STRING,
                                         Sensor.RecordingLevel.INFO.toString(),
-                                        in(Sensor.RecordingLevel.INFO.toString(), Sensor.RecordingLevel.DEBUG.toString()),
+                                        in(Sensor.RecordingLevel.INFO.toString(), Sensor.RecordingLevel.DEBUG.toString(), Sensor.RecordingLevel.TRACE.toString()),
                                         Importance.LOW,
                                         CommonClientConfigs.METRICS_RECORDING_LEVEL_DOC)
                                 .define(METRIC_REPORTER_CLASSES_CONFIG,
@@ -487,8 +492,18 @@ public class ProducerConfig extends AbstractConfig {
         }
     }
 
+    /**
+     * @deprecated Since 2.7.0. This will be removed in a future major release.
+     */
+    @Deprecated
     public static Map<String, Object> addSerializerToConfig(Map<String, Object> configs,
                                                             Serializer<?> keySerializer, Serializer<?> valueSerializer) {
+        return appendSerializerToConfig(configs, keySerializer, valueSerializer);
+    }
+
+    static Map<String, Object> appendSerializerToConfig(Map<String, Object> configs,
+            Serializer<?> keySerializer,
+            Serializer<?> valueSerializer) {
         Map<String, Object> newConfigs = new HashMap<>(configs);
         if (keySerializer != null)
             newConfigs.put(KEY_SERIALIZER_CLASS_CONFIG, keySerializer.getClass());
@@ -497,6 +512,10 @@ public class ProducerConfig extends AbstractConfig {
         return newConfigs;
     }
 
+    /**
+     * @deprecated Since 2.7.0. This will be removed in a future major release.
+     */
+    @Deprecated
     public static Properties addSerializerToConfig(Properties properties,
                                                    Serializer<?> keySerializer,
                                                    Serializer<?> valueSerializer) {
@@ -540,7 +559,7 @@ public class ProducerConfig extends AbstractConfig {
     }
 
     public static void main(String[] args) {
-        System.out.println(CONFIG.toHtml());
+        System.out.println(CONFIG.toHtml(4, config -> "producerconfigs_" + config));
     }
 
 }
