@@ -122,6 +122,26 @@ public interface FieldType {
         }
     }
 
+    final class Uint32FieldType implements FieldType {
+        static final Uint32FieldType INSTANCE = new Uint32FieldType();
+        private static final String NAME = "uint32";
+
+        @Override
+        public String getBoxedJavaType(HeaderGenerator headerGenerator) {
+            return "Long";
+        }
+
+        @Override
+        public Optional<Integer> fixedLength() {
+            return Optional.of(4);
+        }
+
+        @Override
+        public String toString() {
+            return NAME;
+        }
+    }
+
     final class Int64FieldType implements FieldType {
         static final Int64FieldType INSTANCE = new Int64FieldType();
         private static final String NAME = "int64";
@@ -302,6 +322,11 @@ public interface FieldType {
             return true;
         }
 
+        @Override
+        public boolean canBeNullable() {
+            return true;
+        }
+
         public String typeName() {
             return type;
         }
@@ -369,6 +394,8 @@ public interface FieldType {
                 return Int16FieldType.INSTANCE;
             case Uint16FieldType.NAME:
                 return Uint16FieldType.INSTANCE;
+            case Uint32FieldType.NAME:
+                return Uint32FieldType.INSTANCE;
             case Int32FieldType.NAME:
                 return Int32FieldType.INSTANCE;
             case Int64FieldType.NAME:
@@ -386,7 +413,7 @@ public interface FieldType {
             default:
                 if (string.startsWith(ARRAY_PREFIX)) {
                     String elementTypeString = string.substring(ARRAY_PREFIX.length());
-                    if (elementTypeString.length() == 0) {
+                    if (elementTypeString.isEmpty()) {
                         throw new RuntimeException("Can't parse array type " + string +
                             ".  No element type found.");
                     }
@@ -470,14 +497,14 @@ public interface FieldType {
     }
 
     /**
-     * Gets the fixed length of the field, or None if the field is variable-length.
+     * Gets the fixed length of the field, or Empty if the field is variable-length.
      */
     default Optional<Integer> fixedLength() {
         return Optional.empty();
     }
 
     default boolean isVariableLength() {
-        return !fixedLength().isPresent();
+        return fixedLength().isEmpty();
     }
 
     /**

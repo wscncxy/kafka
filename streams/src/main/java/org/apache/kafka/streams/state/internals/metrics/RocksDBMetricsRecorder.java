@@ -23,7 +23,10 @@ import org.apache.kafka.streams.errors.ProcessorStateException;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.RocksDBMetricContext;
+
 import org.rocksdb.Cache;
+import org.rocksdb.HistogramData;
+import org.rocksdb.HistogramType;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.Statistics;
@@ -47,6 +50,7 @@ import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.ES
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.ESTIMATED_NUMBER_OF_KEYS;
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.LIVE_SST_FILES_SIZE;
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.MEMTABLE_FLUSH_PENDING;
+import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.NUMBER_OF_BACKGROUND_ERRORS;
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.NUMBER_OF_DELETES_ACTIVE_MEMTABLE;
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.NUMBER_OF_DELETES_IMMUTABLE_MEMTABLES;
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.NUMBER_OF_ENTRIES_ACTIVE_MEMTABLE;
@@ -57,7 +61,6 @@ import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.NU
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.NUMBER_OF_RUNNING_FLUSHES;
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.PINNED_USAGE_OF_BLOCK_CACHE;
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.SIZE_OF_ALL_MEMTABLES;
-import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.NUMBER_OF_BACKGROUND_ERRORS;
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.TOTAL_SST_FILES_SIZE;
 import static org.apache.kafka.streams.state.internals.metrics.RocksDBMetrics.USAGE_OF_BLOCK_CACHE;
 
@@ -77,12 +80,6 @@ public class RocksDBMetricsRecorder {
             }
             this.statistics = statistics;
         }
-
-        public void maybeCloseStatistics() {
-            if (statistics != null) {
-                statistics.close();
-            }
-        }
     }
 
     private static final String ROCKSDB_PROPERTIES_PREFIX = "rocksdb.";
@@ -94,12 +91,18 @@ public class RocksDBMetricsRecorder {
     private Sensor bytesReadFromDatabaseSensor;
     private Sensor memtableBytesFlushedSensor;
     private Sensor memtableHitRatioSensor;
+    private Sensor memtableAvgFlushTimeSensor;
+    private Sensor memtableMinFlushTimeSensor;
+    private Sensor memtableMaxFlushTimeSensor;
     private Sensor writeStallDurationSensor;
     private Sensor blockCacheDataHitRatioSensor;
     private Sensor blockCacheIndexHitRatioSensor;
     private Sensor blockCacheFilterHitRatioSensor;
     private Sensor bytesReadDuringCompactionSensor;
     private Sensor bytesWrittenDuringCompactionSensor;
+    private Sensor compactionTimeAvgSensor;
+    private Sensor compactionTimeMinSensor;
+    private Sensor compactionTimeMaxSensor;
     private Sensor numberOfOpenFilesSensor;
     private Sensor numberOfFileErrorsSensor;
 
@@ -132,7 +135,7 @@ public class RocksDBMetricsRecorder {
     public void init(final StreamsMetricsImpl streamsMetrics,
                      final TaskId taskId) {
         Objects.requireNonNull(streamsMetrics, "Streams metrics must not be null");
-        Objects.requireNonNull(streamsMetrics, "task ID must not be null");
+        Objects.requireNonNull(taskId, "task ID must not be null");
         if (this.taskId != null && !this.taskId.equals(taskId)) {
             throw new IllegalStateException("Metrics recorder is re-initialised with different task: previous task is " +
                 this.taskId + " whereas current task is " + taskId + ". This is a bug in Kafka Streams. " +
@@ -213,6 +216,9 @@ public class RocksDBMetricsRecorder {
         bytesReadFromDatabaseSensor = RocksDBMetrics.bytesReadFromDatabaseSensor(streamsMetrics, metricContext);
         memtableBytesFlushedSensor = RocksDBMetrics.memtableBytesFlushedSensor(streamsMetrics, metricContext);
         memtableHitRatioSensor = RocksDBMetrics.memtableHitRatioSensor(streamsMetrics, metricContext);
+        memtableAvgFlushTimeSensor = RocksDBMetrics.memtableAvgFlushTimeSensor(streamsMetrics, metricContext);
+        memtableMinFlushTimeSensor = RocksDBMetrics.memtableMinFlushTimeSensor(streamsMetrics, metricContext);
+        memtableMaxFlushTimeSensor = RocksDBMetrics.memtableMaxFlushTimeSensor(streamsMetrics, metricContext);
         writeStallDurationSensor = RocksDBMetrics.writeStallDurationSensor(streamsMetrics, metricContext);
         blockCacheDataHitRatioSensor = RocksDBMetrics.blockCacheDataHitRatioSensor(streamsMetrics, metricContext);
         blockCacheIndexHitRatioSensor = RocksDBMetrics.blockCacheIndexHitRatioSensor(streamsMetrics, metricContext);
@@ -220,6 +226,9 @@ public class RocksDBMetricsRecorder {
         bytesWrittenDuringCompactionSensor =
             RocksDBMetrics.bytesWrittenDuringCompactionSensor(streamsMetrics, metricContext);
         bytesReadDuringCompactionSensor = RocksDBMetrics.bytesReadDuringCompactionSensor(streamsMetrics, metricContext);
+        compactionTimeAvgSensor = RocksDBMetrics.compactionTimeAvgSensor(streamsMetrics, metricContext);
+        compactionTimeMinSensor = RocksDBMetrics.compactionTimeMinSensor(streamsMetrics, metricContext);
+        compactionTimeMaxSensor = RocksDBMetrics.compactionTimeMaxSensor(streamsMetrics, metricContext);
         numberOfOpenFilesSensor = RocksDBMetrics.numberOfOpenFilesSensor(streamsMetrics, metricContext);
         numberOfFileErrorsSensor = RocksDBMetrics.numberOfFileErrorsSensor(streamsMetrics, metricContext);
     }
@@ -365,14 +374,14 @@ public class RocksDBMetricsRecorder {
                         // values of RocksDB properties are of type unsigned long in C++, i.e., in Java we need to use
                         // BigInteger and construct the object from the byte representation of the value
                         result = new BigInteger(1, longToBytes(
-                            valueProvider.db.getAggregatedLongProperty(ROCKSDB_PROPERTIES_PREFIX + propertyName)
+                            valueProvider.db.getLongProperty(ROCKSDB_PROPERTIES_PREFIX + propertyName)
                         ));
                         break;
                     } else {
                         // values of RocksDB properties are of type unsigned long in C++, i.e., in Java we need to use
                         // BigInteger and construct the object from the byte representation of the value
                         result = result.add(new BigInteger(1, longToBytes(
-                            valueProvider.db.getAggregatedLongProperty(ROCKSDB_PROPERTIES_PREFIX + propertyName)
+                            valueProvider.db.getLongProperty(ROCKSDB_PROPERTIES_PREFIX + propertyName)
                         )));
                     }
                 } catch (final RocksDBException e) {
@@ -397,7 +406,6 @@ public class RocksDBMetricsRecorder {
                 " could be found. This is a bug in Kafka Streams. " +
                 "Please open a bug report under https://issues.apache.org/jira/projects/KAFKA/issues");
         }
-        removedValueProviders.maybeCloseStatistics();
         if (storeToValueProviders.isEmpty()) {
             logger.debug(
                 "Removing metrics recorder for store {} of task {} from metrics recording trigger",
@@ -426,6 +434,14 @@ public class RocksDBMetricsRecorder {
         long bytesReadDuringCompaction = 0;
         long numberOfOpenFiles = 0;
         long numberOfFileErrors = 0;
+        long memtableFlushTimeSum = 0;
+        long memtableFlushTimeCount = 0;
+        double memtableFlushTimeMin = Double.MAX_VALUE;
+        double memtableFlushTimeMax = 0.0;
+        long compactionTimeSum = 0;
+        long compactionTimeCount = 0;
+        double compactionTimeMin = Double.MAX_VALUE;
+        double compactionTimeMax = 0.0;
         boolean shouldRecord = true;
         for (final DbAndCacheAndStatistics valueProviders : storeToValueProviders.values()) {
             if (valueProviders.statistics == null) {
@@ -446,21 +462,36 @@ public class RocksDBMetricsRecorder {
             writeStallDuration += valueProviders.statistics.getAndResetTickerCount(TickerType.STALL_MICROS);
             bytesWrittenDuringCompaction += valueProviders.statistics.getAndResetTickerCount(TickerType.COMPACT_WRITE_BYTES);
             bytesReadDuringCompaction += valueProviders.statistics.getAndResetTickerCount(TickerType.COMPACT_READ_BYTES);
-            numberOfOpenFiles += valueProviders.statistics.getAndResetTickerCount(TickerType.NO_FILE_OPENS)
-                - valueProviders.statistics.getAndResetTickerCount(TickerType.NO_FILE_CLOSES);
+            numberOfOpenFiles = -1;
             numberOfFileErrors += valueProviders.statistics.getAndResetTickerCount(TickerType.NO_FILE_ERRORS);
+            final HistogramData memtableFlushTimeData = valueProviders.statistics.getHistogramData(HistogramType.FLUSH_TIME);
+            memtableFlushTimeSum += memtableFlushTimeData.getSum();
+            memtableFlushTimeCount += memtableFlushTimeData.getCount();
+            memtableFlushTimeMin = Double.min(memtableFlushTimeMin, memtableFlushTimeData.getMin());
+            memtableFlushTimeMax = Double.max(memtableFlushTimeMax, memtableFlushTimeData.getMax());
+            final HistogramData compactionTimeData = valueProviders.statistics.getHistogramData(HistogramType.COMPACTION_TIME);
+            compactionTimeSum += compactionTimeData.getSum();
+            compactionTimeCount += compactionTimeData.getCount();
+            compactionTimeMin = Double.min(compactionTimeMin, compactionTimeData.getMin());
+            compactionTimeMax = Double.max(compactionTimeMax, compactionTimeData.getMax());
         }
         if (shouldRecord) {
             bytesWrittenToDatabaseSensor.record(bytesWrittenToDatabase, now);
             bytesReadFromDatabaseSensor.record(bytesReadFromDatabase, now);
             memtableBytesFlushedSensor.record(memtableBytesFlushed, now);
             memtableHitRatioSensor.record(computeHitRatio(memtableHits, memtableMisses), now);
+            memtableAvgFlushTimeSensor.record(computeAvg(memtableFlushTimeSum, memtableFlushTimeCount), now);
+            memtableMinFlushTimeSensor.record(memtableFlushTimeMin, now);
+            memtableMaxFlushTimeSensor.record(memtableFlushTimeMax, now);
             blockCacheDataHitRatioSensor.record(computeHitRatio(blockCacheDataHits, blockCacheDataMisses), now);
             blockCacheIndexHitRatioSensor.record(computeHitRatio(blockCacheIndexHits, blockCacheIndexMisses), now);
             blockCacheFilterHitRatioSensor.record(computeHitRatio(blockCacheFilterHits, blockCacheFilterMisses), now);
             writeStallDurationSensor.record(writeStallDuration, now);
             bytesWrittenDuringCompactionSensor.record(bytesWrittenDuringCompaction, now);
             bytesReadDuringCompactionSensor.record(bytesReadDuringCompaction, now);
+            compactionTimeAvgSensor.record(computeAvg(compactionTimeSum, compactionTimeCount), now);
+            compactionTimeMinSensor.record(compactionTimeMin, now);
+            compactionTimeMaxSensor.record(compactionTimeMax, now);
             numberOfOpenFilesSensor.record(numberOfOpenFiles, now);
             numberOfFileErrorsSensor.record(numberOfFileErrors, now);
         }
@@ -471,5 +502,12 @@ public class RocksDBMetricsRecorder {
             return 0;
         }
         return (double) hits / (hits + misses);
+    }
+
+    private double computeAvg(final long sum, final long count) {
+        if (count == 0) {
+            return 0;
+        }
+        return (double) sum / count;
     }
 }

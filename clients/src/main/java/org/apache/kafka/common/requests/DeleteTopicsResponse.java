@@ -18,11 +18,10 @@ package org.apache.kafka.common.requests;
 
 import org.apache.kafka.common.message.DeleteTopicsResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.protocol.Readable;
 
-import java.nio.ByteBuffer;
-import java.util.HashMap;
+import java.util.EnumMap;
 import java.util.Map;
 
 
@@ -51,21 +50,26 @@ public class DeleteTopicsResponse extends AbstractResponse {
     }
 
     @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
+    }
+
+    @Override
     public DeleteTopicsResponseData data() {
         return data;
     }
 
     @Override
     public Map<Errors, Integer> errorCounts() {
-        HashMap<Errors, Integer> counts = new HashMap<>();
+        Map<Errors, Integer> counts = new EnumMap<>(Errors.class);
         data.responses().forEach(result ->
             updateErrorCounts(counts, Errors.forCode(result.errorCode()))
         );
         return counts;
     }
 
-    public static DeleteTopicsResponse parse(ByteBuffer buffer, short version) {
-        return new DeleteTopicsResponse(new DeleteTopicsResponseData(new ByteBufferAccessor(buffer), version));
+    public static DeleteTopicsResponse parse(Readable readable, short version) {
+        return new DeleteTopicsResponse(new DeleteTopicsResponseData(readable, version));
     }
 
     @Override

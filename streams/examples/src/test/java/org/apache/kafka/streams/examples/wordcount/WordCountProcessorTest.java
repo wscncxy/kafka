@@ -22,6 +22,7 @@ import org.apache.kafka.streams.processor.api.Processor;
 import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.Stores;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
@@ -37,7 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class WordCountProcessorTest {
     @Test
     public void test() {
-        final MockProcessorContext<String, String> context = new MockProcessorContext<String, String>();
+        final MockProcessorContext<String, String> context = new MockProcessorContext<>();
 
         // Create, initialize, and register the state store.
         final KeyValueStore<String, Integer> store =
@@ -48,7 +49,7 @@ public class WordCountProcessorTest {
         store.init(context.getStateStoreContext(), store);
 
         // Create and initialize the processor under test
-        final Processor<String, String, String, String> processor = new WordCountProcessorDemo.MyProcessorSupplier().get();
+        final Processor<String, String, String, String> processor = new WordCountProcessorDemo.WordCountProcessor();
         processor.init(context);
 
         // send a record to the processor

@@ -17,35 +17,36 @@
 
 package org.apache.kafka.controller;
 
-import org.apache.kafka.common.errors.InvalidReplicationFactorException;
 import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
-import org.apache.kafka.metadata.UsableBroker;
+import org.apache.kafka.metadata.placement.UsableBroker;
+
 import org.slf4j.Logger;
 
-import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
-import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.TreeSet;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
-import static org.apache.kafka.controller.BrokerControlState.FENCED;
 import static org.apache.kafka.controller.BrokerControlState.CONTROLLED_SHUTDOWN;
+import static org.apache.kafka.controller.BrokerControlState.FENCED;
 import static org.apache.kafka.controller.BrokerControlState.SHUTDOWN_NOW;
 import static org.apache.kafka.controller.BrokerControlState.UNFENCED;
 
 
 /**
- * The BrokerHeartbeatManager manages all the soft state associated with broker heartbeats.
- * Soft state is state which does not appear in the metadata log.  This state includes
- * things like the last time each broker sent us a heartbeat, and whether the broker is
- * trying to perform a controlled shutdown.
+ * The BrokerHeartbeatManager manages some of the soft state associated with broker heartbeats.
+ * For example, it stores the last metadata offset which each broker reported. It contains the
+ * BrokerHeartbeatTracker, which stores the last time we received a heartbeat from each broker.
+ * In addition to storing this soft state, the BrokerHeartbeatManager aggregates some information
+ * about brokers (such as whether they're fenced or not) into a single place.
  *
  * Only the active controller has a BrokerHeartbeatManager, since only the active
  * controller handles broker heartbeats.  Standby controllers will create a heartbeat
@@ -62,42 +63,32 @@ public class BrokerHeartbeatManager {
         private final int id;
 
         /**
-         * The last time we received a heartbeat from this broker, in monotonic nanoseconds.
-         * When this field is updated, we also may have to update the broker's position in
-         * the unfenced list.
+         * True if this broker is fenced.
          */
-        long lastContactNs;
+        private boolean fenced;
 
         /**
          * The last metadata offset which this broker reported.  When this field is updated,
          * we may also have to update the broker's position in the active set.
          */
-        long metadataOffset;
+        private long metadataOffset;
 
         /**
          * The offset at which the broker should complete its controlled shutdown, or -1
-         * if the broker is not performing a controlled shutdown.  When this field is
-         * updated, we also have to update the broker's position in the shuttingDown set.
+         * if the broker is not performing a controlled shutdown.
          */
-        private long controlledShutDownOffset;
+        private long controlledShutdownOffset;
 
-        /**
-         * The previous entry in the unfenced list, or null if the broker is not in that list.
-         */
-        private BrokerHeartbeatState prev;
-
-        /**
-         * The next entry in the unfenced list, or null if the broker is not in that list.
-         */
-        private BrokerHeartbeatState next;
-
-        BrokerHeartbeatState(int id) {
+        BrokerHeartbeatState(
+            int id,
+            boolean fenced,
+            long metadataOffset,
+            long controlledShutdownOffset
+        ) {
             this.id = id;
-            this.lastContactNs = 0;
-            this.prev = null;
-            this.next = null;
-            this.metadataOffset = -1;
-            this.controlledShutDownOffset = -1;
+            this.fenced = fenced;
+            this.metadataOffset = metadataOffset;
+            this.controlledShutdownOffset = controlledShutdownOffset;
         }
 
         /**
@@ -111,14 +102,25 @@ public class BrokerHeartbeatManager {
          * Returns true only if the broker is fenced.
          */
         boolean fenced() {
-            return prev == null;
+            return fenced;
+        }
+
+        /**
+         * Get the last metadata offset that was reported.
+         */
+        long metadataOffset() {
+            return metadataOffset;
+        }
+
+        void setMetadataOffset(long metadataOffset) {
+            this.metadataOffset = metadataOffset;
         }
 
         /**
          * Returns true only if the broker is in controlled shutdown state.
          */
         boolean shuttingDown() {
-            return controlledShutDownOffset >= 0;
+            return controlledShutdownOffset >= 0;
         }
     }
 
@@ -141,99 +143,12 @@ public class BrokerHeartbeatManager {
         }
     }
 
-    static class BrokerHeartbeatStateList {
-        /**
-         * The head of the list of unfenced brokers.  The list is sorted in ascending order
-         * of last contact time.
-         */
-        private final BrokerHeartbeatState head;
-
-        BrokerHeartbeatStateList() {
-            this.head = new BrokerHeartbeatState(-1);
-            head.prev = head;
-            head.next = head;
-        }
-
-        /**
-         * Return the head of the list, or null if the list is empty.
-         */
-        BrokerHeartbeatState first() {
-            BrokerHeartbeatState result = head.next;
-            return result == head ? null : result;
-        }
-
-        /**
-         * Add the broker to the list. We start looking for a place to put it at the end
-         * of the list.
-         */
-        void add(BrokerHeartbeatState broker) {
-            BrokerHeartbeatState cur = head.prev;
-            while (true) {
-                if (cur == head || cur.lastContactNs <= broker.lastContactNs) {
-                    broker.next = cur.next;
-                    cur.next.prev = broker;
-                    broker.prev = cur;
-                    cur.next = broker;
-                    break;
-                }
-                cur = cur.prev;
-            }
-        }
-
-        /**
-         * Remove a broker from the list.
-         */
-        void remove(BrokerHeartbeatState broker) {
-            if (broker.next == null) {
-                throw new RuntimeException(broker + " is not in the  list.");
-            }
-            broker.prev.next = broker.next;
-            broker.next.prev = broker.prev;
-            broker.prev = null;
-            broker.next = null;
-        }
-
-        BrokerHeartbeatStateIterator iterator() {
-            return new BrokerHeartbeatStateIterator(head);
-        }
-    }
-
-    static class BrokerHeartbeatStateIterator implements Iterator<BrokerHeartbeatState> {
-        private final BrokerHeartbeatState head;
-        private BrokerHeartbeatState cur;
-
-        BrokerHeartbeatStateIterator(BrokerHeartbeatState head) {
-            this.head = head;
-            this.cur = head;
-        }
-
-        @Override
-        public boolean hasNext() {
-            return cur.next != head;
-        }
-
-        @Override
-        public BrokerHeartbeatState next() {
-            if (!hasNext()) {
-                throw new NoSuchElementException();
-            }
-            BrokerHeartbeatState result = cur.next;
-            cur = cur.next;
-            return result;
-        }
-    }
-
     private final Logger log;
 
     /**
-     * The Kafka clock object to use.
+     * Tracks the last time broker heartbeats were reported for each broker.
      */
-    private final Time time;
-
-    /**
-     * The broker session timeout in nanoseconds.
-     */
-    private final long sessionTimeoutNs;
+    private final BrokerHeartbeatTracker tracker;
 
     /**
      * Maps broker IDs to heartbeat states.
@@ -241,35 +156,43 @@ public class BrokerHeartbeatManager {
     private final HashMap<Integer, BrokerHeartbeatState> brokers;
 
     /**
-     * The list of unfenced brokers, sorted by last contact time.
-     */
-    private final BrokerHeartbeatStateList unfenced;
-
-    /**
      * The set of active brokers.  A broker is active if it is unfenced, and not shutting
      * down.
      */
     private final TreeSet<BrokerHeartbeatState> active;
 
-    BrokerHeartbeatManager(LogContext logContext,
-                           Time time,
-                           long sessionTimeoutNs) {
+    BrokerHeartbeatManager(
+        LogContext logContext,
+        Time time,
+        long sessionTimeoutNs
+    ) {
         this.log = logContext.logger(BrokerHeartbeatManager.class);
-        this.time = time;
-        this.sessionTimeoutNs = sessionTimeoutNs;
+        this.tracker = new BrokerHeartbeatTracker(time, sessionTimeoutNs);
         this.brokers = new HashMap<>();
-        this.unfenced = new BrokerHeartbeatStateList();
         this.active = new TreeSet<>(MetadataOffsetComparator.INSTANCE);
+    }
+
+    BrokerHeartbeatTracker tracker() {
+        return tracker;
     }
 
     // VisibleForTesting
     Time time() {
-        return time;
+        return tracker.time();
     }
 
     // VisibleForTesting
-    BrokerHeartbeatStateList unfenced() {
-        return unfenced;
+    Collection<BrokerHeartbeatState> brokers() {
+        return brokers.values();
+    }
+
+    // VisibleForTesting
+    OptionalLong controlledShutdownOffset(int brokerId) {
+        BrokerHeartbeatState broker = brokers.get(brokerId);
+        if (broker == null || broker.controlledShutdownOffset == -1) {
+            return OptionalLong.empty();
+        }
+        return OptionalLong.of(broker.controlledShutdownOffset);
     }
 
     /**
@@ -280,7 +203,8 @@ public class BrokerHeartbeatManager {
     void fence(int brokerId) {
         BrokerHeartbeatState broker = brokers.get(brokerId);
         if (broker != null) {
-            untrack(broker);
+            broker.fenced = true;
+            active.remove(broker);
         }
     }
 
@@ -292,7 +216,7 @@ public class BrokerHeartbeatManager {
     void remove(int brokerId) {
         BrokerHeartbeatState broker = brokers.remove(brokerId);
         if (broker != null) {
-            untrack(broker);
+            active.remove(broker);
         }
     }
 
@@ -304,7 +228,6 @@ public class BrokerHeartbeatManager {
      */
     private void untrack(BrokerHeartbeatState broker) {
         if (!broker.fenced()) {
-            unfenced.remove(broker);
             if (!broker.shuttingDown()) {
                 active.remove(broker);
             }
@@ -315,28 +238,31 @@ public class BrokerHeartbeatManager {
      * Check if the given broker has a valid session.
      *
      * @param brokerId      The broker ID to check.
+     * @param brokerEpoch   The broker epoch to check.
      *
      * @return              True if the given broker has a valid session.
      */
-    boolean hasValidSession(int brokerId) {
-        BrokerHeartbeatState broker = brokers.get(brokerId);
-        if (broker == null) return false;
-        return hasValidSession(broker);
+    boolean hasValidSession(int brokerId, long brokerEpoch) {
+        return tracker.hasValidSession(new BrokerIdAndEpoch(brokerId, brokerEpoch));
     }
 
     /**
-     * Check if the given broker has a valid session.
+     * Register this broker if we haven't already, and make sure its fencing state is
+     * correct.
      *
-     * @param broker        The broker to check.
-     *
-     * @return              True if the given broker has a valid session.
+     * @param brokerId          The broker ID.
+     * @param fenced            True only if the broker is currently fenced.
      */
-    private boolean hasValidSession(BrokerHeartbeatState broker) {
-        if (broker.fenced()) {
-            return false;
-        } else {
-            return broker.lastContactNs + sessionTimeoutNs >= time.nanoseconds();
+    void register(int brokerId, boolean fenced) {
+        BrokerHeartbeatState broker = brokers.get(brokerId);
+        long metadataOffset = -1L;
+        if (broker == null) {
+            broker = new BrokerHeartbeatState(brokerId, fenced, -1L, -1L);
+            brokers.put(brokerId, broker);
+        } else if (broker.fenced() != fenced) {
+            metadataOffset = broker.metadataOffset;
         }
+        touch(brokerId, fenced, metadataOffset);
     }
 
     /**
@@ -345,29 +271,30 @@ public class BrokerHeartbeatManager {
      * @param brokerId          The broker ID.
      * @param fenced            True only if the broker is currently fenced.
      * @param metadataOffset    The latest metadata offset of the broker.
+     * @throws IllegalStateException if the broker is not registered.
      */
     void touch(int brokerId, boolean fenced, long metadataOffset) {
-        BrokerHeartbeatState broker = brokers.get(brokerId);
-        if (broker == null) {
-            broker = new BrokerHeartbeatState(brokerId);
-            brokers.put(brokerId, broker);
-        } else {
-            // Remove the broker from the unfenced list and/or the active set. Its
-            // position in either of those data structures depends on values we are
-            // changing here. We will re-add it if necessary at the end of this function.
-            untrack(broker);
-        }
-        broker.lastContactNs = time.nanoseconds();
+        BrokerHeartbeatState broker = heartbeatStateOrThrow(brokerId);
+        // Remove the broker from the unfenced list and/or the active set. Its
+        // position in either of those data structures depends on values we are
+        // changing here. We will re-add it if necessary at the end of this function.
+        untrack(broker);
+        broker.fenced = fenced;
         broker.metadataOffset = metadataOffset;
+        boolean isActive = false;
         if (fenced) {
             // If a broker is fenced, it leaves controlled shutdown.  On its next heartbeat,
             // it will shut down immediately.
-            broker.controlledShutDownOffset = -1;
+            broker.controlledShutdownOffset = -1;
         } else {
-            unfenced.add(broker);
             if (!broker.shuttingDown()) {
-                active.add(broker);
+                isActive = true;
             }
+        }
+        if (isActive) {
+            active.add(broker);
+        } else {
+            active.remove(broker);
         }
     }
 
@@ -381,80 +308,30 @@ public class BrokerHeartbeatManager {
     }
 
     /**
-     * Mark a broker as being in the controlled shutdown state.
+     * Mark a broker as being in the controlled shutdown state. We only update the
+     * controlledShutdownOffset if the broker was previously not in controlled shutdown state.
      *
      * @param brokerId                  The broker id.
      * @param controlledShutDownOffset  The offset at which controlled shutdown will be complete.
      */
-    void updateControlledShutdownOffset(int brokerId, long controlledShutDownOffset) {
-        BrokerHeartbeatState broker = brokers.get(brokerId);
-        if (broker == null) {
-            throw new RuntimeException("Unable to locate broker " + brokerId);
-        }
+    void maybeUpdateControlledShutdownOffset(int brokerId, long controlledShutDownOffset) {
+        BrokerHeartbeatState broker = heartbeatStateOrThrow(brokerId);
         if (broker.fenced()) {
             throw new RuntimeException("Fenced brokers cannot enter controlled shutdown.");
         }
         active.remove(broker);
-        broker.controlledShutDownOffset = controlledShutDownOffset;
-        log.debug("Updated the controlled shutdown offset for broker {} to {}.",
-            brokerId, controlledShutDownOffset);
-    }
-
-    /**
-     * Return the time in monotonic nanoseconds at which we should check if a broker
-     * session needs to be expired.
-     */
-    long nextCheckTimeNs() {
-        BrokerHeartbeatState broker = unfenced.first();
-        if (broker == null) {
-            return Long.MAX_VALUE;
-        } else {
-            return broker.lastContactNs + sessionTimeoutNs;
+        if (broker.controlledShutdownOffset < 0) {
+            broker.controlledShutdownOffset = controlledShutDownOffset;
+            log.debug("Updated the controlled shutdown offset for broker {} to {}.",
+                brokerId, controlledShutDownOffset);
         }
     }
 
-    /**
-     * Find the stale brokers which haven't heartbeated in a long time, and which need to
-     * be fenced.
-     *
-     * @return      A list of node IDs.
-     */
-    List<Integer> findStaleBrokers() {
-        List<Integer> nodes = new ArrayList<>();
-        BrokerHeartbeatStateIterator iterator = unfenced.iterator();
-        while (iterator.hasNext()) {
-            BrokerHeartbeatState broker = iterator.next();
-            if (hasValidSession(broker)) {
-                break;
-            }
-            nodes.add(broker.id);
-        }
-        return nodes;
-    }
-
-    /**
-     * Place replicas on unfenced brokers.
-     *
-     * @param startPartition    The partition ID to start with.
-     * @param numPartitions     The number of partitions to place.
-     * @param numReplicas       The number of replicas for each partition.
-     * @param idToRack          A function mapping broker id to broker rack.
-     * @param policy            The replica placement policy to use.
-     *
-     * @return                  A list of replica lists.
-     *
-     * @throws InvalidReplicationFactorException    If too many replicas were requested.
-     */
-    List<List<Integer>> placeReplicas(int startPartition,
-                                      int numPartitions,
-                                      short numReplicas,
-                                      Function<Integer, Optional<String>> idToRack,
-                                      ReplicaPlacementPolicy policy) {
-        // TODO: support using fenced brokers here if necessary to get to the desired
-        // number of replicas. We probably need to add a fenced boolean in UsableBroker.
-        Iterator<UsableBroker> iterator = new UsableBrokerIterator(
-            unfenced.iterator(), idToRack);
-        return policy.createPlacement(startPartition, numPartitions, numReplicas, iterator);
+    Iterator<UsableBroker> usableBrokers(
+        Function<Integer, Optional<String>> idToRack
+    ) {
+        return new UsableBrokerIterator(brokers.values().iterator(),
+            idToRack);
     }
 
     static class UsableBrokerIterator implements Iterator<UsableBroker> {
@@ -482,7 +359,7 @@ public class BrokerHeartbeatManager {
                 result = iterator.next();
             } while (result.shuttingDown());
             Optional<String> rack = idToRack.apply(result.id());
-            next = new UsableBroker(result.id(), rack);
+            next = new UsableBroker(result.id(), rack, result.fenced());
             return true;
         }
 
@@ -510,20 +387,20 @@ public class BrokerHeartbeatManager {
     /**
      * Calculate the next broker state for a broker that just sent a heartbeat request.
      *
-     * @param brokerId              The broker id.
-     * @param request               The incoming heartbeat request.
-     * @param lastCommittedOffset   The last committed offset of the quorum controller.
-     * @param hasLeaderships        A callback which evaluates to true if the broker leads
-     *                              at least one partition.
+     * @param brokerId                     The broker id.
+     * @param request                      The incoming heartbeat request.
+     * @param registerBrokerRecordOffset   The offset of the broker's {@link org.apache.kafka.common.metadata.RegisterBrokerRecord}.
+     * @param hasLeaderships               A callback which evaluates to true if the broker leads
+     *                                     at least one partition.
      *
-     * @return                      The current and next broker states.
+     * @throws IllegalStateException       If the broker is not registered.
+     * @return                             The current and next broker states.
      */
     BrokerControlStates calculateNextBrokerState(int brokerId,
                                                  BrokerHeartbeatRequestData request,
-                                                 long lastCommittedOffset,
+                                                 long registerBrokerRecordOffset,
                                                  Supplier<Boolean> hasLeaderships) {
-        BrokerHeartbeatState broker = brokers.getOrDefault(brokerId,
-            new BrokerHeartbeatState(brokerId));
+        BrokerHeartbeatState broker = heartbeatStateOrThrow(brokerId);
         BrokerControlState currentState = currentBrokerState(broker);
         switch (currentState) {
             case FENCED:
@@ -532,17 +409,17 @@ public class BrokerHeartbeatManager {
                         "shutdown.", brokerId);
                     return new BrokerControlStates(currentState, SHUTDOWN_NOW);
                 } else if (!request.wantFence()) {
-                    if (request.currentMetadataOffset() >= lastCommittedOffset) {
+                    if (request.currentMetadataOffset() >= registerBrokerRecordOffset) {
                         log.info("The request from broker {} to unfence has been granted " +
-                                "because it has caught up with the last committed metadata " +
-                                "offset {}.", brokerId, lastCommittedOffset);
+                                "because it has caught up with the offset of its register " +
+                                "broker record {}.", brokerId, registerBrokerRecordOffset);
                         return new BrokerControlStates(currentState, UNFENCED);
                     } else {
                         if (log.isDebugEnabled()) {
                             log.debug("The request from broker {} to unfence cannot yet " +
-                                "be granted because it has not caught up with the last " +
-                                "committed metadata offset {}. It is still at offset {}.",
-                                brokerId, lastCommittedOffset, request.currentMetadataOffset());
+                                "be granted because it has not caught up with the offset of " +
+                                "its register broker record {}. It is still at offset {}.",
+                                brokerId, registerBrokerRecordOffset, request.currentMetadataOffset());
                         }
                         return new BrokerControlStates(currentState, FENCED);
                     }
@@ -580,21 +457,29 @@ public class BrokerHeartbeatManager {
                     return new BrokerControlStates(currentState, CONTROLLED_SHUTDOWN);
                 }
                 long lowestActiveOffset = lowestActiveOffset();
-                if (broker.controlledShutDownOffset <= lowestActiveOffset) {
+                if (broker.controlledShutdownOffset <= lowestActiveOffset) {
                     log.info("The request from broker {} to shut down has been granted " +
                         "since the lowest active offset {} is now greater than the " +
                         "broker's controlled shutdown offset {}.", brokerId,
-                        lowestActiveOffset, broker.controlledShutDownOffset);
+                        lowestActiveOffset, broker.controlledShutdownOffset);
                     return new BrokerControlStates(currentState, SHUTDOWN_NOW);
                 }
                 log.debug("The request from broker {} to shut down can not yet be granted " +
                     "because the lowest active offset {} is not greater than the broker's " +
                     "shutdown offset {}.", brokerId, lowestActiveOffset,
-                    broker.controlledShutDownOffset);
+                    broker.controlledShutdownOffset);
                 return new BrokerControlStates(currentState, CONTROLLED_SHUTDOWN);
 
             default:
                 return new BrokerControlStates(currentState, SHUTDOWN_NOW);
         }
+    }
+
+    private BrokerHeartbeatState heartbeatStateOrThrow(int brokerId) {
+        BrokerHeartbeatState broker = brokers.get(brokerId);
+        if (broker == null) {
+            throw new IllegalStateException("Broker " + brokerId + " is not registered.");
+        }
+        return broker;
     }
 }

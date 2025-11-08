@@ -17,13 +17,19 @@
 package org.apache.kafka.clients.admin;
 
 import java.util.Map;
-import org.apache.kafka.common.annotation.InterfaceStability;
 
 /**
  * Options for {@link AdminClient#updateFeatures(Map, UpdateFeaturesOptions)}.
- *
- * The API of this class is evolving. See {@link Admin} for details.
  */
-@InterfaceStability.Evolving
 public class UpdateFeaturesOptions extends AbstractOptions<UpdateFeaturesOptions> {
+    private boolean validateOnly = false;
+
+    public boolean validateOnly() {
+        return validateOnly;
+    }
+
+    public UpdateFeaturesOptions validateOnly(boolean validateOnly) {
+        this.validateOnly = validateOnly;
+        return this;
+    }
 }

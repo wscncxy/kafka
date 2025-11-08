@@ -27,12 +27,12 @@ import org.apache.kafka.connect.util.ConnectorTaskId;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import static org.apache.kafka.common.message.JoinGroupRequestData.JoinGroupRequestProtocol;
 import static org.apache.kafka.common.message.JoinGroupRequestData.JoinGroupRequestProtocolCollection;
@@ -142,7 +142,7 @@ public class ConnectProtocol {
      * @return the collection of Connect protocol metadata
      */
     public static JoinGroupRequestProtocolCollection metadataRequest(WorkerState workerState) {
-        return new JoinGroupRequestProtocolCollection(Collections.singleton(
+        return new JoinGroupRequestProtocolCollection(Set.of(
                 new JoinGroupRequestProtocol()
                         .setName(EAGER.protocol())
                         .setMetadata(ConnectProtocol.serializeMetadata(workerState).array()))
@@ -252,7 +252,7 @@ public class ConnectProtocol {
         }
 
         /**
-         * The most up-to-date (maximum) configuration offset according known to this worker.
+         * The most up-to-date (maximum) configuration offset known to this worker.
          *
          * @return the configuration offset
          */
@@ -288,7 +288,7 @@ public class ConnectProtocol {
         /**
          * Create an assignment indicating responsibility for the given connector instances and task Ids.
          *
-         * @param error error code for this assignment; {@code ConnectProtocol.Assignment.NO_ERROR}
+         * @param error error code for this assignment; {@link ConnectProtocol.Assignment#NO_ERROR}
          *              indicates no error during assignment
          * @param leader Connect group's leader Id; may be null only on the empty assignment
          * @param leaderUrl Connect group's leader URL; may be null only on the empty assignment
@@ -309,7 +309,7 @@ public class ConnectProtocol {
         }
 
         /**
-         * Return the error code of this assignment; 0 signals successful assignment ({@code ConnectProtocol.Assignment.NO_ERROR}).
+         * Return the error code of this assignment; 0 signals successful assignment ({@link ConnectProtocol.Assignment#NO_ERROR}).
          *
          * @return the error code of the assignment
          */
@@ -347,7 +347,7 @@ public class ConnectProtocol {
         /**
          * Return the most up-to-date offset in the configuration topic according to this assignment
          *
-         * @return the configuration topic
+         * @return the up-to-date configuration topic offset
          */
         public long offset() {
             return offset;

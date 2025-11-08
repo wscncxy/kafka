@@ -18,12 +18,14 @@ package org.apache.kafka.common.internals;
 
 import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.test.TestUtils;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -79,6 +81,14 @@ public class TopicTest {
 
         for (String topic : trueTopics)
             assertTrue(Topic.hasCollisionChars(topic));
+    }
+
+    @Test
+    public void testUnifyCollisionChars() {
+        assertEquals("topic", Topic.unifyCollisionChars("topic"));
+        assertEquals("_topic", Topic.unifyCollisionChars(".topic"));
+        assertEquals("_topic", Topic.unifyCollisionChars("_topic"));
+        assertEquals("__topic", Topic.unifyCollisionChars("_.topic"));
     }
 
     @Test

@@ -19,26 +19,14 @@ package org.apache.kafka.raft;
 import java.util.Objects;
 import java.util.OptionalInt;
 
-public class LeaderAndEpoch {
-    public final OptionalInt leaderId;
-    public final int epoch;
+public record LeaderAndEpoch(OptionalInt leaderId, int epoch) {
+    public static final LeaderAndEpoch UNKNOWN = new LeaderAndEpoch(OptionalInt.empty(), 0);
 
-    public LeaderAndEpoch(OptionalInt leaderId, int epoch) {
-        this.leaderId = Objects.requireNonNull(leaderId);
-        this.epoch = epoch;
+    public LeaderAndEpoch {
+        Objects.requireNonNull(leaderId);
     }
 
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        LeaderAndEpoch that = (LeaderAndEpoch) o;
-        return epoch == that.epoch &&
-            leaderId.equals(that.leaderId);
-    }
-
-    @Override
-    public int hashCode() {
-        return Objects.hash(leaderId, epoch);
+    public boolean isLeader(int nodeId) {
+        return leaderId.isPresent() && leaderId.getAsInt() == nodeId;
     }
 }

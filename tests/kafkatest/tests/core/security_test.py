@@ -19,7 +19,7 @@ from ducktape.mark.resource import cluster
 from ducktape.utils.util import wait_until
 from ducktape.errors import TimeoutError
 
-from kafkatest.services.kafka import quorum
+from kafkatest.services.kafka import quorum, consumer_group
 from kafkatest.services.security.security_config import SecurityConfig
 from kafkatest.services.security.security_config import SslStores
 from kafkatest.tests.end_to_end import EndToEndTest
@@ -58,9 +58,19 @@ class SecurityTest(EndToEndTest):
         return True
 
     @cluster(num_nodes=6)
-    @matrix(security_protocol=['PLAINTEXT'], interbroker_security_protocol=['SSL'], metadata_quorum=quorum.all_non_upgrade)
-    @matrix(security_protocol=['SSL'], interbroker_security_protocol=['PLAINTEXT'], metadata_quorum=quorum.all_non_upgrade)
-    def test_client_ssl_endpoint_validation_failure(self, security_protocol, interbroker_security_protocol, metadata_quorum=quorum.zk):
+    @matrix(
+        security_protocol=['PLAINTEXT'],
+        interbroker_security_protocol=['SSL'],
+        metadata_quorum=[quorum.isolated_kraft],
+        group_protocol=consumer_group.all_group_protocols
+    )
+    @matrix(
+        security_protocol=['SSL'],
+        interbroker_security_protocol=['PLAINTEXT'],
+        metadata_quorum=[quorum.isolated_kraft],
+        group_protocol=consumer_group.all_group_protocols
+    )
+    def test_client_ssl_endpoint_validation_failure(self, security_protocol, interbroker_security_protocol, metadata_quorum, group_protocol=None):
         """
         Test that invalid hostname in certificate results in connection failures.
         When security_protocol=SSL, client SSL handshakes are expected to fail due to hostname verification failure.
@@ -75,13 +85,9 @@ class SecurityTest(EndToEndTest):
         SecurityConfig.ssl_stores = TestSslStores(self.test_context.local_scratch_dir,
                                                   valid_hostname=True)
 
-        self.create_zookeeper_if_necessary()
-        if self.zk:
-            self.zk.start()
-
         self.create_kafka(security_protocol=security_protocol,
                           interbroker_security_protocol=interbroker_security_protocol)
-        if self.kafka.quorum_info.using_raft and interbroker_security_protocol == 'SSL':
+        if self.kafka.quorum_info.using_kraft and interbroker_security_protocol == 'SSL':
             # we don't want to interfere with communication to the controller quorum
             # (we separately test this below) so make sure it isn't using TLS
             # (it uses the inter-broker security information by default)
@@ -94,15 +100,15 @@ class SecurityTest(EndToEndTest):
         SecurityConfig.ssl_stores.valid_hostname = False
         self.kafka.restart_cluster()
 
-        if self.kafka.quorum_info.using_raft and security_protocol == 'PLAINTEXT':
+        if self.kafka.quorum_info.using_kraft and security_protocol == 'PLAINTEXT':
             # the inter-broker security protocol using TLS with a hostname verification failure
-            # doesn't impact a producer in case of a single broker with a Raft Controller,
+            # doesn't impact a producer in case of a single broker with a KRaft Controller,
             # so confirm that this is in fact the observed behavior
-            self.create_and_start_clients(log_level="INFO")
+            self.create_and_start_clients(log_level="INFO", group_protocol=group_protocol)
             self.run_validation()
         else:
             # We need more verbose logging to catch the expected errors
-            self.create_and_start_clients(log_level="DEBUG")
+            self.create_and_start_clients(log_level="DEBUG", group_protocol=group_protocol)
 
             try:
                 wait_until(lambda: self.producer.num_acked > 0, timeout_sec=30)
@@ -121,51 +127,42 @@ class SecurityTest(EndToEndTest):
 
             SecurityConfig.ssl_stores.valid_hostname = True
             self.kafka.restart_cluster()
-            self.create_and_start_clients(log_level="INFO")
+            self.create_and_start_clients(log_level="INFO", group_protocol=group_protocol)
             self.run_validation()
 
-    def create_and_start_clients(self, log_level):
+    def create_and_start_clients(self, log_level, group_protocol):
         self.create_producer(log_level=log_level)
         self.producer.start()
 
-        self.create_consumer(log_level=log_level)
+        self.create_consumer(log_level=log_level, group_protocol=group_protocol)
         self.consumer.start()
 
     @cluster(num_nodes=2)
-    @matrix(metadata_quorum=[quorum.zk, quorum.remote_raft])
-    def test_quorum_ssl_endpoint_validation_failure(self, metadata_quorum=quorum.zk):
+    @matrix(
+        metadata_quorum=[quorum.isolated_kraft],
+        group_protocol=consumer_group.all_group_protocols
+    )
+    def test_quorum_ssl_endpoint_validation_failure(self, metadata_quorum, group_protocol=None):
         """
-        Test that invalid hostname in ZooKeeper or Raft Controller results in broker inability to start.
+        Test that invalid hostname in ZooKeeper or KRaft Controller results in broker inability to start.
         """
-        # Start ZooKeeper/Raft-based Controller with valid hostnames in the certs' SANs
+        # Start KRaft Controller with valid hostnames in the certs' SANs
         # so that we can start Kafka
         SecurityConfig.ssl_stores = TestSslStores(self.test_context.local_scratch_dir,
                                                   valid_hostname=True)
 
-        self.create_zookeeper_if_necessary(num_nodes=1,
-                                           zk_client_port = False,
-                                           zk_client_secure_port = True,
-                                           zk_tls_encrypt_only = True,
-                                           )
-        if self.zk:
-            self.zk.start()
-
         self.create_kafka(num_nodes=1,
-                          interbroker_security_protocol='SSL', # also sets the broker-to-raft-controller security protocol for the Raft case
-                          zk_client_secure=True, # ignored if we aren't using ZooKeeper
+                          interbroker_security_protocol='SSL', # also sets the broker-to-kraft-controller security protocol for the KRaft case
                           )
         self.kafka.start()
 
         # now stop the Kafka broker
-        # and set the cert for ZooKeeper/Raft-based Controller to have an invalid hostname
+        # and set the cert for ZooKeeper/KRaft Controller to have an invalid hostname
         # so we can restart Kafka and ensure it is unable to start
         self.kafka.stop_node(self.kafka.nodes[0])
 
         SecurityConfig.ssl_stores.valid_hostname = False
-        if quorum.for_test(self.test_context) == quorum.zk:
-            self.kafka.zk.restart_cluster()
-        else:
-            self.kafka.remote_controller_quorum.restart_cluster()
+        self.kafka.isolated_controller_quorum.restart_cluster()
 
         try:
             self.kafka.start_node(self.kafka.nodes[0], timeout_sec=30)

@@ -19,8 +19,7 @@ package org.apache.kafka.connect.file;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTaskContext;
 import org.apache.kafka.connect.storage.OffsetStorageReader;
-import org.easymock.EasyMock;
-import org.easymock.EasyMockSupport;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,15 +30,18 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
-public class FileStreamSourceTaskTest extends EasyMockSupport {
+public class FileStreamSourceTaskTest {
 
     private static final String TOPIC = "test";
 
@@ -49,8 +51,6 @@ public class FileStreamSourceTaskTest extends EasyMockSupport {
     private SourceTaskContext context;
     private FileStreamSourceTask task;
 
-    private boolean verifyMocks = false;
-
     @BeforeEach
     public void setup() throws IOException {
         tempFile = File.createTempFile("file-stream-source-task-test", null);
@@ -59,28 +59,19 @@ public class FileStreamSourceTaskTest extends EasyMockSupport {
         config.put(FileStreamSourceConnector.TOPIC_CONFIG, TOPIC);
         config.put(FileStreamSourceConnector.TASK_BATCH_SIZE_CONFIG, String.valueOf(FileStreamSourceConnector.DEFAULT_TASK_BATCH_SIZE));
         task = new FileStreamSourceTask(2);
-        offsetStorageReader = createMock(OffsetStorageReader.class);
-        context = createMock(SourceTaskContext.class);
+        offsetStorageReader = mock(OffsetStorageReader.class);
+        context = mock(SourceTaskContext.class);
         task.initialize(context);
     }
 
     @AfterEach
-    public void teardown() {
-        tempFile.delete();
-
-        if (verifyMocks)
-            verifyAll();
-    }
-
-    private void replay() {
-        replayAll();
-        verifyMocks = true;
+    public void teardown() throws IOException {
+        Files.deleteIfExists(tempFile.toPath());
     }
 
     @Test
     public void testNormalLifecycle() throws InterruptedException, IOException {
         expectOffsetLookupReturnNone();
-        replay();
 
         task.start(config);
 
@@ -95,8 +86,8 @@ public class FileStreamSourceTaskTest extends EasyMockSupport {
         assertEquals(1, records.size());
         assertEquals(TOPIC, records.get(0).topic());
         assertEquals("partial line finished", records.get(0).value());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(0).sourcePartition());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.POSITION_FIELD, 22L), records.get(0).sourceOffset());
+        assertEquals(Map.of(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(0).sourcePartition());
+        assertEquals(Map.of(FileStreamSourceTask.POSITION_FIELD, 22L), records.get(0).sourceOffset());
         assertNull(task.poll());
 
         // Different line endings, and make sure the final \r doesn't result in a line until we can
@@ -106,34 +97,35 @@ public class FileStreamSourceTaskTest extends EasyMockSupport {
         records = task.poll();
         assertEquals(4, records.size());
         assertEquals("line1", records.get(0).value());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(0).sourcePartition());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.POSITION_FIELD, 28L), records.get(0).sourceOffset());
+        assertEquals(Map.of(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(0).sourcePartition());
+        assertEquals(Map.of(FileStreamSourceTask.POSITION_FIELD, 28L), records.get(0).sourceOffset());
         assertEquals("line2", records.get(1).value());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(1).sourcePartition());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.POSITION_FIELD, 35L), records.get(1).sourceOffset());
+        assertEquals(Map.of(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(1).sourcePartition());
+        assertEquals(Map.of(FileStreamSourceTask.POSITION_FIELD, 35L), records.get(1).sourceOffset());
         assertEquals("line3", records.get(2).value());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(2).sourcePartition());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.POSITION_FIELD, 41L), records.get(2).sourceOffset());
+        assertEquals(Map.of(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(2).sourcePartition());
+        assertEquals(Map.of(FileStreamSourceTask.POSITION_FIELD, 41L), records.get(2).sourceOffset());
         assertEquals("line4", records.get(3).value());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(3).sourcePartition());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.POSITION_FIELD, 47L), records.get(3).sourceOffset());
+        assertEquals(Map.of(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(3).sourcePartition());
+        assertEquals(Map.of(FileStreamSourceTask.POSITION_FIELD, 47L), records.get(3).sourceOffset());
 
         os.write("subsequent text".getBytes());
         os.flush();
         records = task.poll();
         assertEquals(1, records.size());
         assertEquals("", records.get(0).value());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(0).sourcePartition());
-        assertEquals(Collections.singletonMap(FileStreamSourceTask.POSITION_FIELD, 48L), records.get(0).sourceOffset());
+        assertEquals(Map.of(FileStreamSourceTask.FILENAME_FIELD, tempFile.getAbsolutePath()), records.get(0).sourcePartition());
+        assertEquals(Map.of(FileStreamSourceTask.POSITION_FIELD, 48L), records.get(0).sourceOffset());
 
         os.close();
         task.stop();
+
+        verifyAll();
     }
 
     @Test
     public void testBatchSize() throws IOException, InterruptedException {
         expectOffsetLookupReturnNone();
-        replay();
 
         config.put(FileStreamSourceConnector.TASK_BATCH_SIZE_CONFIG, "5000");
         task.start(config);
@@ -154,13 +146,13 @@ public class FileStreamSourceTaskTest extends EasyMockSupport {
 
         os.close();
         task.stop();
+        verifyAll();
     }
 
     @Test
     public void testBufferResize() throws IOException, InterruptedException {
         int batchSize = 1000;
         expectOffsetLookupReturnNone();
-        replay();
 
         config.put(FileStreamSourceConnector.TASK_BATCH_SIZE_CONFIG, Integer.toString(batchSize));
         task.start(config);
@@ -181,6 +173,8 @@ public class FileStreamSourceTaskTest extends EasyMockSupport {
         writeAndAssertBufferSize(batchSize, os, "9       \n".getBytes(), 2048);
         os.close();
         task.stop();
+
+        verifyAll();
     }
 
     private void writeAndAssertBufferSize(int batchSize, OutputStream os, byte[] bytes, int expectBufferSize)
@@ -203,9 +197,7 @@ public class FileStreamSourceTaskTest extends EasyMockSupport {
     }
 
     @Test
-    public void testMissingFile() throws InterruptedException {
-        replay();
-
+    public void testUsingSystemInputSourceOnMissingFile() throws InterruptedException {
         String data = "line\n";
         System.setIn(new ByteArrayInputStream(data.getBytes()));
 
@@ -220,17 +212,22 @@ public class FileStreamSourceTaskTest extends EasyMockSupport {
         task.stop();
     }
 
+    @Test
     public void testInvalidFile() throws InterruptedException {
         config.put(FileStreamSourceConnector.FILE_CONFIG, "bogusfilename");
         task.start(config);
         // Currently the task retries indefinitely if the file isn't found, but shouldn't return any data.
-        for (int i = 0; i < 100; i++)
+        for (int i = 0; i < 3; i++)
             assertNull(task.poll());
     }
 
-
     private void expectOffsetLookupReturnNone() {
-        EasyMock.expect(context.offsetStorageReader()).andReturn(offsetStorageReader);
-        EasyMock.expect(offsetStorageReader.offset(EasyMock.<Map<String, String>>anyObject())).andReturn(null);
+        when(context.offsetStorageReader()).thenReturn(offsetStorageReader);
+        when(offsetStorageReader.offset(anyMap())).thenReturn(null);
+    }
+
+    private void verifyAll() {
+        verify(context).offsetStorageReader();
+        verify(offsetStorageReader).offset(anyMap());
     }
 }

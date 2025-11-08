@@ -42,6 +42,14 @@ public class ResultOrError<T> {
         this.result = result;
     }
 
+    public static <T> ResultOrError<T> of(T result) {
+        return new ResultOrError<>(result);
+    }
+
+    public static <T> ResultOrError<T> of(ApiError error) {
+        return new ResultOrError<>(error);
+    }
+
     public boolean isError() {
         return error != null;
     }
@@ -63,7 +71,7 @@ public class ResultOrError<T> {
         if (o == null || (!o.getClass().equals(getClass()))) {
             return false;
         }
-        ResultOrError other = (ResultOrError) o;
+        ResultOrError<?> other = (ResultOrError<?>) o;
         return Objects.equals(error, other.error) &&
             Objects.equals(result, other.result);
     }

@@ -18,18 +18,19 @@
 package org.apache.kafka.controller;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.metadata.Replicas;
+import org.apache.kafka.server.common.TopicIdPartition;
 import org.apache.kafka.timeline.SnapshotRegistry;
 import org.apache.kafka.timeline.TimelineHashMap;
 
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.NoSuchElementException;
-import java.util.Objects;
 
-import static org.apache.kafka.controller.ReplicationControlManager.NO_LEADER;
+import static org.apache.kafka.metadata.LeaderConstants.NO_LEADER;
+import static org.apache.kafka.metadata.Replicas.NONE;
 
 
 /**
@@ -48,53 +49,16 @@ import static org.apache.kafka.controller.ReplicationControlManager.NO_LEADER;
  * works because partition IDs cannot be negative.
  */
 public class BrokersToIsrs {
-    private final static int[] EMPTY = new int[0];
+    private static final int LEADER_FLAG = 0x8000_0000;
 
-    private final static int LEADER_FLAG = 0x8000_0000;
-
-    private final static int REPLICA_MASK = 0x7fff_ffff;
-
-    static class TopicIdPartition {
-        private final Uuid topicId;
-        private final int partitionId;
-
-        TopicIdPartition(Uuid topicId, int partitionId) {
-            this.topicId = topicId;
-            this.partitionId = partitionId;
-        }
-
-        public Uuid topicId() {
-            return topicId;
-        }
-
-        public int partitionId() {
-            return partitionId;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (!(o instanceof TopicIdPartition)) return false;
-            TopicIdPartition other = (TopicIdPartition) o;
-            return other.topicId.equals(topicId) && other.partitionId == partitionId;
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(topicId, partitionId);
-        }
-
-        @Override
-        public String toString() {
-            return topicId + ":" + partitionId;
-        }
-    }
+    private static final int REPLICA_MASK = 0x7fff_ffff;
 
     static class PartitionsOnReplicaIterator implements Iterator<TopicIdPartition> {
         private final Iterator<Entry<Uuid, int[]>> iterator;
         private final boolean leaderOnly;
         private int offset = 0;
         Uuid uuid = Uuid.ZERO_UUID;
-        int[] replicas = EMPTY;
+        int[] replicas = NONE;
         private TopicIdPartition next = null;
 
         PartitionsOnReplicaIterator(Map<Uuid, int[]> topicMap, boolean leaderOnly) {
@@ -139,7 +103,7 @@ public class BrokersToIsrs {
      * Partitions with no isr members appear in this map under id NO_LEADER.
      */
     private final TimelineHashMap<Integer, TimelineHashMap<Uuid, int[]>> isrMembers;
-
+    
     BrokersToIsrs(SnapshotRegistry snapshotRegistry) {
         this.snapshotRegistry = snapshotRegistry;
         this.isrMembers = new TimelineHashMap<>(snapshotRegistry, 0);
@@ -159,7 +123,7 @@ public class BrokersToIsrs {
                 int prevLeader, int nextLeader) {
         int[] prev;
         if (prevIsr == null) {
-            prev = EMPTY;
+            prev = NONE;
         } else {
             if (prevLeader == NO_LEADER) {
                 prev = Replicas.copyWith(prevIsr, NO_LEADER);
@@ -170,7 +134,7 @@ public class BrokersToIsrs {
         }
         int[] next;
         if (nextIsr == null) {
-            next = EMPTY;
+            next = NONE;
         } else {
             if (nextLeader == NO_LEADER) {
                 next = Replicas.copyWith(nextIsr, NO_LEADER);
@@ -292,11 +256,10 @@ public class BrokersToIsrs {
             }
         } else {
             int[] newPartitions = new int[partitions.length - 1];
-            int j = 0;
-            for (int i = 0; i < partitions.length; i++) {
-                int partition = partitions[i];
+            int i = 0;
+            for (int partition : partitions) {
                 if (partition != removedPartition) {
-                    newPartitions[j++] = partition;
+                    newPartitions[i++] = partition;
                 }
             }
             topicMap.put(topicId, newPartitions);
@@ -306,13 +269,17 @@ public class BrokersToIsrs {
     PartitionsOnReplicaIterator iterator(int brokerId, boolean leadersOnly) {
         Map<Uuid, int[]> topicMap = isrMembers.get(brokerId);
         if (topicMap == null) {
-            topicMap = Collections.emptyMap();
+            topicMap = Map.of();
         }
         return new PartitionsOnReplicaIterator(topicMap, leadersOnly);
     }
 
-    PartitionsOnReplicaIterator noLeaderIterator() {
+    PartitionsOnReplicaIterator partitionsWithNoLeader() {
         return iterator(NO_LEADER, true);
+    }
+
+    PartitionsOnReplicaIterator partitionsWithBrokerInIsr(int brokerId) {
+        return iterator(brokerId, false);
     }
 
     boolean hasLeaderships(int brokerId) {

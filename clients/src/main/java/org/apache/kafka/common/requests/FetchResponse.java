@@ -16,23 +16,28 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.Node;
+import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.protocol.ObjectSerializationCache;
+import org.apache.kafka.common.protocol.Readable;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.Records;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
+import java.util.EnumMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.apache.kafka.common.requests.FetchMetadata.INVALID_SESSION_ID;
 
@@ -54,6 +59,10 @@ import static org.apache.kafka.common.requests.FetchMetadata.INVALID_SESSION_ID;
  *     not supported by the fetch request version
  * - {@link Errors#CORRUPT_MESSAGE} If corrupt message encountered, e.g. when the broker scans the log to find
  *     the fetch offset after the index lookup
+ * - {@link Errors#UNKNOWN_TOPIC_ID} If the request contains a topic ID unknown to the broker
+ * - {@link Errors#FETCH_SESSION_TOPIC_ID_ERROR} If the request version supports topic IDs but the session does not or vice versa,
+ *     or a topic ID in the request is inconsistent with a topic ID in the session
+ * - {@link Errors#INCONSISTENT_TOPIC_ID} If a topic ID in the session does not match the topic ID in the log
  * - {@link Errors#UNKNOWN_SERVER_ERROR} For any unexpected errors
  */
 public class FetchResponse extends AbstractResponse {
@@ -63,15 +72,21 @@ public class FetchResponse extends AbstractResponse {
     public static final int INVALID_PREFERRED_REPLICA_ID = -1;
 
     private final FetchResponseData data;
-    // we build responseData when needed.
-    private volatile LinkedHashMap<TopicPartition, FetchResponseData.PartitionData> responseData = null;
 
     @Override
     public FetchResponseData data() {
         return data;
     }
 
-    public FetchResponse(FetchResponseData fetchResponseData) {
+    /**
+     * From version 3 or later, the authorized and existing entries in `FetchRequest.fetchData` should be in the same order in `responseData`.
+     * Version 13 introduces topic IDs which can lead to a few new errors. If there is any unknown topic ID in the request, the
+     * response will contain a partition-level UNKNOWN_TOPIC_ID error for that partition.
+     * If a request's topic ID usage is inconsistent with the session, we will return a top level FETCH_SESSION_TOPIC_ID_ERROR error.
+     * We may also return INCONSISTENT_TOPIC_ID error as a partition-level error when a partition in the session has a topic ID
+     * inconsistent with the log.
+     */
+    private FetchResponse(FetchResponseData fetchResponseData) {
         super(ApiKeys.FETCH);
         this.data = fetchResponseData;
     }
@@ -80,18 +95,20 @@ public class FetchResponse extends AbstractResponse {
         return Errors.forCode(data.errorCode());
     }
 
-    public LinkedHashMap<TopicPartition, FetchResponseData.PartitionData> responseData() {
-        if (responseData == null) {
-            synchronized (this) {
-                if (responseData == null) {
-                    responseData = new LinkedHashMap<>();
-                    data.responses().forEach(topicResponse ->
-                            topicResponse.partitions().forEach(partition ->
-                                    responseData.put(new TopicPartition(topicResponse.topic(), partition.partitionIndex()), partition))
-                    );
-                }
+    public LinkedHashMap<TopicPartition, FetchResponseData.PartitionData> responseData(Map<Uuid, String> topicNames, short version) {
+        final LinkedHashMap<TopicPartition, FetchResponseData.PartitionData> responseData = new LinkedHashMap<>();
+        data.responses().forEach(topicResponse -> {
+            String name;
+            if (version < 13) {
+                name = topicResponse.topic();
+            } else {
+                name = topicNames.get(topicResponse.topicId());
             }
-        }
+            if (name != null) {
+                topicResponse.partitions().forEach(partition ->
+                    responseData.put(new TopicPartition(name, partition.partitionIndex()), partition));
+            }
+        });
         return responseData;
     }
 
@@ -100,13 +117,18 @@ public class FetchResponse extends AbstractResponse {
         return data.throttleTimeMs();
     }
 
+    @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
+    }
+
     public int sessionId() {
         return data.sessionId();
     }
 
     @Override
     public Map<Errors, Integer> errorCounts() {
-        Map<Errors, Integer> errorCounts = new HashMap<>();
+        Map<Errors, Integer> errorCounts = new EnumMap<>(Errors.class);
         updateErrorCounts(errorCounts, error());
         data.responses().forEach(topicResponse ->
             topicResponse.partitions().forEach(partition ->
@@ -115,8 +137,21 @@ public class FetchResponse extends AbstractResponse {
         return errorCounts;
     }
 
-    public static FetchResponse parse(ByteBuffer buffer, short version) {
-        return new FetchResponse(new FetchResponseData(new ByteBufferAccessor(buffer), version));
+    /**
+     * Creates a {@link org.apache.kafka.common.requests.FetchResponse} from the given byte buffer.
+     * Unlike {@link org.apache.kafka.common.requests.FetchResponse#of(FetchResponseData)}, this method doesn't convert
+     * null records to {@link org.apache.kafka.common.record.MemoryRecords#EMPTY}.
+     *
+     * <p><strong>This method should only be used in client-side.</strong></p>
+     */
+    public static FetchResponse parse(Readable readable, short version) {
+        return new FetchResponse(new FetchResponseData(readable, version));
+    }
+
+    // Fetch versions 13 and above should have topic IDs for all topics.
+    // Fetch versions < 13 should return the empty set.
+    public Set<Uuid> topicIds() {
+        return data.responses().stream().map(FetchResponseData.FetchableTopicResponse::topicId).filter(id -> !id.equals(Uuid.ZERO_UUID)).collect(Collectors.toSet());
     }
 
     /**
@@ -127,10 +162,11 @@ public class FetchResponse extends AbstractResponse {
      * @return              The response size in bytes.
      */
     public static int sizeOf(short version,
-                             Iterator<Map.Entry<TopicPartition, FetchResponseData.PartitionData>> partIterator) {
+                             Iterator<Map.Entry<TopicIdPartition,
+                             FetchResponseData.PartitionData>> partIterator) {
         // Since the throttleTimeMs and metadata field sizes are constant and fixed, we can
         // use arbitrary values here without affecting the result.
-        FetchResponseData data = toMessage(Errors.NONE, 0, INVALID_SESSION_ID, partIterator);
+        FetchResponseData data = toMessage(Errors.NONE, 0, INVALID_SESSION_ID, partIterator, Collections.emptyList());
         ObjectSerializationCache cache = new ObjectSerializationCache();
         return 4 + data.size(cache, version);
     }
@@ -158,19 +194,20 @@ public class FetchResponse extends AbstractResponse {
         return partitionResponse.preferredReadReplica() != INVALID_PREFERRED_REPLICA_ID;
     }
 
+    public static FetchResponseData.PartitionData partitionResponse(TopicIdPartition topicIdPartition, Errors error) {
+        return partitionResponse(topicIdPartition.topicPartition().partition(), error);
+    }
+
     public static FetchResponseData.PartitionData partitionResponse(int partition, Errors error) {
         return new FetchResponseData.PartitionData()
             .setPartitionIndex(partition)
             .setErrorCode(error.code())
-            .setHighWatermark(FetchResponse.INVALID_HIGH_WATERMARK);
+            .setHighWatermark(FetchResponse.INVALID_HIGH_WATERMARK)
+            .setRecords(MemoryRecords.EMPTY);
     }
 
     /**
      * Returns `partition.records` as `Records` (instead of `BaseRecords`). If `records` is `null`, returns `MemoryRecords.EMPTY`.
-     *
-     * If this response was deserialized after a fetch, this method should never fail. An example where this would
-     * fail is a down-converted response (e.g. LazyDownConversionRecords) on the broker (before it's serialized and
-     * sent on the wire).
      *
      * @param partition partition data
      * @return Records or empty record if the records in PartitionData is null.
@@ -189,41 +226,84 @@ public class FetchResponse extends AbstractResponse {
         return partition.records() == null ? 0 : partition.records().sizeInBytes();
     }
 
+    /**
+     * Creates a {@link org.apache.kafka.common.requests.FetchResponse} from the given data.
+     * This method converts null records to {@link org.apache.kafka.common.record.MemoryRecords#EMPTY}
+     * to ensure consistent record representation in the response.
+     *
+     * <p><strong>This method should only be used in server-side.</strong></p>
+     */
+    public static FetchResponse of(FetchResponseData data) {
+        for (FetchResponseData.FetchableTopicResponse response : data.responses()) {
+            for (FetchResponseData.PartitionData partition : response.partitions()) {
+                if (partition.records() == null)
+                    partition.setRecords(MemoryRecords.EMPTY);
+            }
+        }
+        return new FetchResponse(data);
+    }
+
+    // TODO: remove as a part of KAFKA-12410
     public static FetchResponse of(Errors error,
                                    int throttleTimeMs,
                                    int sessionId,
-                                   LinkedHashMap<TopicPartition, FetchResponseData.PartitionData> responseData) {
-        return new FetchResponse(toMessage(error, throttleTimeMs, sessionId, responseData.entrySet().iterator()));
+                                   LinkedHashMap<TopicIdPartition, FetchResponseData.PartitionData> responseData,
+                                   List<Node> nodeEndpoints) {
+        return new FetchResponse(toMessage(error, throttleTimeMs, sessionId, responseData.entrySet().iterator(), nodeEndpoints));
+    }
+
+    private static boolean matchingTopic(FetchResponseData.FetchableTopicResponse previousTopic, TopicIdPartition currentTopic) {
+        if (previousTopic == null)
+            return false;
+        if (!previousTopic.topicId().equals(Uuid.ZERO_UUID))
+            return previousTopic.topicId().equals(currentTopic.topicId());
+        else
+            return previousTopic.topic().equals(currentTopic.topicPartition().topic());
+
     }
 
     private static FetchResponseData toMessage(Errors error,
                                                int throttleTimeMs,
                                                int sessionId,
-                                               Iterator<Map.Entry<TopicPartition, FetchResponseData.PartitionData>> partIterator) {
+                                               Iterator<Map.Entry<TopicIdPartition, FetchResponseData.PartitionData>> partIterator,
+                                               List<Node> nodeEndpoints) {
         List<FetchResponseData.FetchableTopicResponse> topicResponseList = new ArrayList<>();
-        partIterator.forEachRemaining(entry -> {
+        while (partIterator.hasNext()) {
+            Map.Entry<TopicIdPartition, FetchResponseData.PartitionData> entry = partIterator.next();
             FetchResponseData.PartitionData partitionData = entry.getValue();
             // Since PartitionData alone doesn't know the partition ID, we set it here
-            partitionData.setPartitionIndex(entry.getKey().partition());
+            partitionData.setPartitionIndex(entry.getKey().topicPartition().partition());
+            // To protect the clients from failing due to null records,
+            // we always convert null records to MemoryRecords.EMPTY
+            // We will propose a KIP to change the schema definitions in the future
+            if (partitionData.records() == null)
+                partitionData.setRecords(MemoryRecords.EMPTY);
             // We have to keep the order of input topic-partition. Hence, we batch the partitions only if the last
             // batch is in the same topic group.
             FetchResponseData.FetchableTopicResponse previousTopic = topicResponseList.isEmpty() ? null
                 : topicResponseList.get(topicResponseList.size() - 1);
-            if (previousTopic != null && previousTopic.topic().equals(entry.getKey().topic()))
+            if (matchingTopic(previousTopic, entry.getKey()))
                 previousTopic.partitions().add(partitionData);
             else {
                 List<FetchResponseData.PartitionData> partitionResponses = new ArrayList<>();
                 partitionResponses.add(partitionData);
                 topicResponseList.add(new FetchResponseData.FetchableTopicResponse()
-                    .setTopic(entry.getKey().topic())
+                    .setTopic(entry.getKey().topicPartition().topic())
+                    .setTopicId(entry.getKey().topicId())
                     .setPartitions(partitionResponses));
             }
-        });
-
-        return new FetchResponseData()
-            .setThrottleTimeMs(throttleTimeMs)
-            .setErrorCode(error.code())
-            .setSessionId(sessionId)
-            .setResponses(topicResponseList);
+        }
+        FetchResponseData data = new FetchResponseData();
+        // KafkaApis should only pass in node endpoints on error, otherwise this should be an empty list
+        nodeEndpoints.forEach(endpoint -> data.nodeEndpoints().add(
+                new FetchResponseData.NodeEndpoint()
+                        .setNodeId(endpoint.id())
+                        .setHost(endpoint.host())
+                        .setPort(endpoint.port())
+                        .setRack(endpoint.rack())));
+        return data.setThrottleTimeMs(throttleTimeMs)
+                .setErrorCode(error.code())
+                .setSessionId(sessionId)
+                .setResponses(topicResponseList);
     }
 }

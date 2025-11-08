@@ -17,38 +17,41 @@
 
 package org.apache.kafka.streams.kstream.internals.graph;
 
-import org.apache.kafka.streams.kstream.internals.KTableKTableJoinMerger;
-import org.apache.kafka.streams.kstream.internals.KTableProcessorSupplier;
-import org.apache.kafka.streams.kstream.internals.KTableSource;
+import org.apache.kafka.streams.internals.ApiUtils;
+import org.apache.kafka.streams.processor.api.FixedKeyProcessorSupplier;
 import org.apache.kafka.streams.processor.api.ProcessorSupplier;
-import org.apache.kafka.streams.processor.internals.ProcessorAdapter;
+import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
+import org.apache.kafka.streams.state.StoreBuilder;
+
+import java.util.Set;
 
 /**
- * Class used to represent a {@link ProcessorSupplier} and the name
+ * Class used to represent a {@link ProcessorSupplier} or {@link FixedKeyProcessorSupplier} and the name
  * used to register it with the {@link org.apache.kafka.streams.processor.internals.InternalTopologyBuilder}
  *
  * Used by the Join nodes as there are several parameters, this abstraction helps
  * keep the number of arguments more reasonable.
+ *
+ * @see ProcessorSupplier
+ * @see FixedKeyProcessorSupplier
  */
 public class ProcessorParameters<KIn, VIn, KOut, VOut> {
 
-    // During the transition to KIP-478, we capture arguments passed from the old API to simplify
-    // the performance of casts that we still need to perform. This will eventually be removed.
-    private final org.apache.kafka.streams.processor.ProcessorSupplier<KIn, VIn> oldProcessorSupplier;
     private final ProcessorSupplier<KIn, VIn, KOut, VOut> processorSupplier;
+    private final FixedKeyProcessorSupplier<KIn, VIn, VOut> fixedKeyProcessorSupplier;
     private final String processorName;
-
-    public ProcessorParameters(final org.apache.kafka.streams.processor.ProcessorSupplier<KIn, VIn> processorSupplier,
-                               final String processorName) {
-        oldProcessorSupplier = processorSupplier;
-        this.processorSupplier = () -> ProcessorAdapter.adapt(processorSupplier.get());
-        this.processorName = processorName;
-    }
 
     public ProcessorParameters(final ProcessorSupplier<KIn, VIn, KOut, VOut> processorSupplier,
                                final String processorName) {
-        oldProcessorSupplier = null;
         this.processorSupplier = processorSupplier;
+        fixedKeyProcessorSupplier = null;
+        this.processorName = processorName;
+    }
+
+    public ProcessorParameters(final FixedKeyProcessorSupplier<KIn, VIn, VOut> processorSupplier,
+                               final String processorName) {
+        this.processorSupplier = null;
+        fixedKeyProcessorSupplier = processorSupplier;
         this.processorName = processorName;
     }
 
@@ -56,29 +59,40 @@ public class ProcessorParameters<KIn, VIn, KOut, VOut> {
         return processorSupplier;
     }
 
-    public org.apache.kafka.streams.processor.ProcessorSupplier<KIn, VIn> oldProcessorSupplier() {
-        return oldProcessorSupplier;
+    public FixedKeyProcessorSupplier<KIn, VIn, VOut> fixedKeyProcessorSupplier() {
+        return fixedKeyProcessorSupplier;
     }
 
-    @SuppressWarnings("unchecked")
-    KTableSource<KIn, VIn> kTableSourceSupplier() {
-        // This cast always works because KTableSource hasn't been converted yet.
-        return oldProcessorSupplier == null
-            ? null
-            : !(oldProcessorSupplier instanceof KTableSource)
-              ? null
-              : (KTableSource<KIn, VIn>) oldProcessorSupplier;
-    }
+    public void addProcessorTo(final InternalTopologyBuilder topologyBuilder, final String... parentNodeNames) {
+        if (processorSupplier != null) {
+            ApiUtils.checkSupplier(processorSupplier);
 
-    @SuppressWarnings("unchecked")
-    <VR> KTableProcessorSupplier<KIn, VIn, VR> kTableProcessorSupplier() {
-        // This cast always works because KTableProcessorSupplier hasn't been converted yet.
-        return (KTableProcessorSupplier<KIn, VIn, VR>) oldProcessorSupplier;
-    }
+            final ProcessorSupplier<KIn, VIn, KOut, VOut> wrapped =
+                topologyBuilder.wrapProcessorSupplier(processorName, processorSupplier);
 
-    @SuppressWarnings("unchecked")
-    KTableKTableJoinMerger<KIn, VIn> kTableKTableJoinMergerProcessorSupplier() {
-        return (KTableKTableJoinMerger<KIn, VIn>) oldProcessorSupplier;
+            topologyBuilder.addProcessor(processorName, wrapped, parentNodeNames);
+            final Set<StoreBuilder<?>> stores = wrapped.stores();
+            if (stores != null) {
+                for (final StoreBuilder<?> storeBuilder : stores) {
+                    topologyBuilder.addStateStore(storeBuilder, processorName);
+                }
+            }
+        }
+
+        if (fixedKeyProcessorSupplier != null) {
+            ApiUtils.checkSupplier(fixedKeyProcessorSupplier);
+
+            final FixedKeyProcessorSupplier<KIn, VIn, VOut> wrapped =
+                topologyBuilder.wrapFixedKeyProcessorSupplier(processorName, fixedKeyProcessorSupplier);
+
+            topologyBuilder.addProcessor(processorName, wrapped, parentNodeNames);
+            final Set<StoreBuilder<?>> stores = wrapped.stores();
+            if (stores != null) {
+                for (final StoreBuilder<?> storeBuilder : stores) {
+                    topologyBuilder.addStateStore(storeBuilder, processorName);
+                }
+            }
+        }
     }
 
     public String processorName() {
@@ -88,7 +102,8 @@ public class ProcessorParameters<KIn, VIn, KOut, VOut> {
     @Override
     public String toString() {
         return "ProcessorParameters{" +
-            "processor class=" + processorSupplier.get().getClass() +
+            "processor supplier class=" + (processorSupplier != null ? processorSupplier.getClass() : "null") +
+            ", fixed key processor supplier class=" + (fixedKeyProcessorSupplier != null ? fixedKeyProcessorSupplier.getClass() : "null") +
             ", processor name='" + processorName + '\'' +
             '}';
     }

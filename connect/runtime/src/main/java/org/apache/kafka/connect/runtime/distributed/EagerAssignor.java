@@ -18,7 +18,9 @@ package org.apache.kafka.connect.runtime.distributed;
 
 import org.apache.kafka.common.utils.CircularIterator;
 import org.apache.kafka.common.utils.LogContext;
+import org.apache.kafka.connect.storage.ClusterConfigState;
 import org.apache.kafka.connect.util.ConnectorTaskId;
+
 import org.slf4j.Logger;
 
 import java.nio.ByteBuffer;
@@ -39,7 +41,7 @@ import static org.apache.kafka.connect.runtime.distributed.WorkerCoordinator.Lea
  * connectors are assigned to the workers first, followed by the tasks. This is to avoid
  * load imbalance when several 1-task connectors are running, given that a connector is usually
  * more lightweight than a task.
- *
+ * <p>
  * Note that this class is NOT thread-safe.
  */
 public class EagerAssignor implements ConnectAssignor {
@@ -50,7 +52,7 @@ public class EagerAssignor implements ConnectAssignor {
     }
 
     @Override
-    public Map<String, ByteBuffer> performAssignment(String leaderId, String protocol,
+    public Map<String, ByteBuffer> performAssignment(String leaderId, ConnectProtocolCompatibility protocol,
                                                      List<JoinGroupResponseMember> allMemberMetadata,
                                                      WorkerCoordinator coordinator) {
         log.debug("Performing task assignment");
@@ -102,22 +104,14 @@ public class EagerAssignor implements ConnectAssignor {
         for (String connectorId : connectorsSorted) {
             String connectorAssignedTo = memberIt.next();
             log.trace("Assigning connector {} to {}", connectorId, connectorAssignedTo);
-            Collection<String> memberConnectors = connectorAssignments.get(connectorAssignedTo);
-            if (memberConnectors == null) {
-                memberConnectors = new ArrayList<>();
-                connectorAssignments.put(connectorAssignedTo, memberConnectors);
-            }
+            Collection<String> memberConnectors = connectorAssignments.computeIfAbsent(connectorAssignedTo, k -> new ArrayList<>());
             memberConnectors.add(connectorId);
         }
         for (String connectorId : connectorsSorted) {
             for (ConnectorTaskId taskId : sorted(coordinator.configSnapshot().tasks(connectorId))) {
                 String taskAssignedTo = memberIt.next();
                 log.trace("Assigning task {} to {}", taskId, taskAssignedTo);
-                Collection<ConnectorTaskId> memberTasks = taskAssignments.get(taskAssignedTo);
-                if (memberTasks == null) {
-                    memberTasks = new ArrayList<>();
-                    taskAssignments.put(taskAssignedTo, memberTasks);
-                }
+                Collection<ConnectorTaskId> memberTasks = taskAssignments.computeIfAbsent(taskAssignedTo, k -> new ArrayList<>());
                 memberTasks.add(taskId);
             }
         }
@@ -138,13 +132,13 @@ public class EagerAssignor implements ConnectAssignor {
 
         Map<String, ByteBuffer> groupAssignment = new HashMap<>();
         for (String member : members) {
-            Collection<String> connectors = connectorAssignments.get(member);
+            Collection<String> connectors = connectorAssignments.getOrDefault(member, List.of());
             if (connectors == null) {
-                connectors = Collections.emptyList();
+                connectors = List.of();
             }
-            Collection<ConnectorTaskId> tasks = taskAssignments.get(member);
+            Collection<ConnectorTaskId> tasks = taskAssignments.getOrDefault(member, List.of());
             if (tasks == null) {
-                tasks = Collections.emptyList();
+                tasks = List.of();
             }
             Assignment assignment = new Assignment(error, leaderId, leaderUrl, maxOffset, connectors, tasks);
             log.debug("Assignment: {} -> {}", member, assignment);

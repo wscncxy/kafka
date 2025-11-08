@@ -20,6 +20,7 @@ package org.apache.kafka.common.protocol;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.record.BaseRecords;
 import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.UnalignedMemoryRecords;
 
 import java.nio.ByteBuffer;
 
@@ -39,6 +40,9 @@ public interface Writable {
         if (records instanceof MemoryRecords) {
             MemoryRecords memRecords = (MemoryRecords) records;
             writeByteBuffer(memRecords.buffer());
+        } else if (records instanceof UnalignedMemoryRecords) {
+            UnalignedMemoryRecords memRecords = (UnalignedMemoryRecords) records;
+            writeByteBuffer(memRecords.buffer());
         } else {
             throw new UnsupportedOperationException("Unsupported record type " + records.getClass());
         }
@@ -53,5 +57,9 @@ public interface Writable {
         // The setter functions in the generated code prevent us from setting
         // ints outside the valid range of a short.
         writeShort((short) i);
+    }
+
+    default void writeUnsignedInt(long i) {
+        writeInt((int) i);
     }
 }

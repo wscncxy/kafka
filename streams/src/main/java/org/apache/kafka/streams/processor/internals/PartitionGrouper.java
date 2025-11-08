@@ -21,6 +21,8 @@ import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.processor.TaskId;
+import org.apache.kafka.streams.processor.internals.TopologyMetadata.Subtopology;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,13 +36,14 @@ import java.util.Set;
 /**
  * Groups partitions by the partition id.
  *
- * Join operations requires that topics of the joining entities are copartitoned, i.e., being partitioned by the same key and having the same
+ * Join operations requires that topics of the joining entities are copartitioned, i.e., being partitioned by the same key and having the same
  * number of partitions. Copartitioning is ensured by having the same number of partitions on
  * joined topics, and by using the serialization and Producer's default partitioner.
  */
 public class PartitionGrouper {
 
     private static final Logger log = LoggerFactory.getLogger(PartitionGrouper.class);
+
     /**
      * Generate tasks with the assigned topic partitions.
      *
@@ -48,29 +51,55 @@ public class PartitionGrouper {
      * @param metadata      metadata of the consuming cluster
      * @return The map from generated task ids to the assigned partitions
      */
-    public Map<TaskId, Set<TopicPartition>> partitionGroups(final Map<Integer, Set<String>> topicGroups, final Cluster metadata) {
-        final Map<TaskId, Set<TopicPartition>> groups = new HashMap<>();
+    public Map<TaskId, Set<TopicPartition>> partitionGroups(final Map<Subtopology, Set<String>> topicGroups, final Cluster metadata) {
+        return partitionGroups(topicGroups, new HashMap<>(), new HashMap<>(), metadata);
+    }
 
-        for (final Map.Entry<Integer, Set<String>> entry : topicGroups.entrySet()) {
-            final Integer topicGroupId = entry.getKey();
-            final Set<String> topicGroup = entry.getValue();
+    /**
+     * Generate tasks with the assigned topic partitions.
+     *
+     * @param sourceTopicGroups        group of source topics that need to be joined together
+     * @param changelogTopicGroups     group of changelog topics that need to be joined together
+     * @param changelogPartitionGroups the output grouping of the changelog topic partitions by task
+     *                                 id. This input will be mutated.
+     * @param metadata                 metadata of the consuming cluster
+     * @return The map from generated task ids to the assigned partitions
+     */
+    public Map<TaskId, Set<TopicPartition>> partitionGroups(final Map<Subtopology, Set<String>> sourceTopicGroups,
+                                                            final Map<Subtopology, Set<String>> changelogTopicGroups,
+                                                            final Map<TaskId, Set<TopicPartition>> changelogPartitionGroups,
+                                                            final Cluster metadata) {
+        final Map<TaskId, Set<TopicPartition>> sourcePartitionGroups = new HashMap<>();
 
-            final int maxNumPartitions = maxNumPartitions(metadata, topicGroup);
+        for (final Map.Entry<Subtopology, Set<String>> entry : sourceTopicGroups.entrySet()) {
+            final Subtopology subtopology = entry.getKey();
+            final Set<String> sourceTopicGroup = entry.getValue();
+            final Set<String> changelogTopicGroup = changelogTopicGroups.getOrDefault(subtopology, new HashSet<>());
+
+            final int maxNumPartitions = maxNumPartitions(metadata, sourceTopicGroup);
 
             for (int partitionId = 0; partitionId < maxNumPartitions; partitionId++) {
-                final Set<TopicPartition> group = new HashSet<>(topicGroup.size());
+                final Set<TopicPartition> sourcePartitionGroup = new HashSet<>(sourceTopicGroup.size());
+                final Set<TopicPartition> changelogPartitionGroup = new HashSet<>(changelogTopicGroup.size());
 
-                for (final String topic : topicGroup) {
+                for (final String topic : sourceTopicGroup) {
                     final List<PartitionInfo> partitions = metadata.partitionsForTopic(topic);
                     if (partitionId < partitions.size()) {
-                        group.add(new TopicPartition(topic, partitionId));
+                        sourcePartitionGroup.add(new TopicPartition(topic, partitionId));
                     }
                 }
-                groups.put(new TaskId(topicGroupId, partitionId), Collections.unmodifiableSet(group));
+
+                for (final String topic : changelogTopicGroup) {
+                    changelogPartitionGroup.add(new TopicPartition(topic, partitionId));
+                }
+
+                final TaskId taskId = new TaskId(subtopology.nodeGroupId, partitionId, subtopology.namedTopology);
+                sourcePartitionGroups.put(taskId, Collections.unmodifiableSet(sourcePartitionGroup));
+                changelogPartitionGroups.put(taskId, Collections.unmodifiableSet(changelogPartitionGroup));
             }
         }
 
-        return Collections.unmodifiableMap(groups);
+        return Collections.unmodifiableMap(sourcePartitionGroups);
     }
 
     /**
@@ -94,6 +123,3 @@ public class PartitionGrouper {
     }
 
 }
-
-
-

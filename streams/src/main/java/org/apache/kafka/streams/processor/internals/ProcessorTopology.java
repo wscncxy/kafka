@@ -17,6 +17,7 @@
 package org.apache.kafka.streams.processor.internals;
 
 import org.apache.kafka.streams.processor.StateStore;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,40 +27,41 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public class ProcessorTopology {
-    private final Logger log = LoggerFactory.getLogger(ProcessorTopology.class);
+    private static final Logger log = LoggerFactory.getLogger(ProcessorTopology.class);
 
     private final List<ProcessorNode<?, ?, ?, ?>> processorNodes;
-    private final Map<String, SourceNode<?, ?, ?, ?>> sourceNodesByName;
-    private final Map<String, SourceNode<?, ?, ?, ?>> sourceNodesByTopic;
-    private final Map<String, SinkNode<?, ?, ?, ?>> sinksByTopic;
+    private final Map<String, SourceNode<?, ?>> sourceNodesByName;
+    private final Map<String, SourceNode<?, ?>> sourceNodesByTopic;
+    private final Map<String, SinkNode<?, ?>> sinksByTopic;
     private final Set<String> terminalNodes;
     private final List<StateStore> stateStores;
-    private final Set<String> stateStoreNames;
     private final Set<String> repartitionTopics;
 
     // the following contains entries for the entire topology, eg stores that do not belong to this ProcessorTopology
     private final List<StateStore> globalStateStores;
     private final Map<String, String> storeToChangelogTopic;
+    private final Map<String, Optional<InternalTopologyBuilder.ReprocessFactory<?, ?, ?, ?>>> storeNameToReprocessOnRestore;
 
     public ProcessorTopology(final List<ProcessorNode<?, ?, ?, ?>> processorNodes,
-                             final Map<String, SourceNode<?, ?, ?, ?>> sourceNodesByTopic,
-                             final Map<String, SinkNode<?, ?, ?, ?>> sinksByTopic,
+                             final Map<String, SourceNode<?, ?>> sourceNodesByTopic,
+                             final Map<String, SinkNode<?, ?>> sinksByTopic,
                              final List<StateStore> stateStores,
                              final List<StateStore> globalStateStores,
                              final Map<String, String> storeToChangelogTopic,
-                             final Set<String> repartitionTopics) {
+                             final Set<String> repartitionTopics,
+                             final Map<String, Optional<InternalTopologyBuilder.ReprocessFactory<?, ?, ?, ?>>> storeNameToReprocessOnRestore) {
         this.processorNodes = Collections.unmodifiableList(processorNodes);
         this.sourceNodesByTopic = new HashMap<>(sourceNodesByTopic);
         this.sinksByTopic = Collections.unmodifiableMap(sinksByTopic);
         this.stateStores = Collections.unmodifiableList(stateStores);
-        stateStoreNames = stateStores.stream().map(StateStore::name).collect(Collectors.toSet());
         this.globalStateStores = Collections.unmodifiableList(globalStateStores);
         this.storeToChangelogTopic = Collections.unmodifiableMap(storeToChangelogTopic);
         this.repartitionTopics = Collections.unmodifiableSet(repartitionTopics);
+        this.storeNameToReprocessOnRestore = storeNameToReprocessOnRestore;
 
         this.terminalNodes = new HashSet<>();
         for (final ProcessorNode<?, ?, ?, ?> node : processorNodes) {
@@ -69,7 +71,7 @@ public class ProcessorTopology {
         }
 
         this.sourceNodesByName = new HashMap<>();
-        for (final SourceNode<?, ?, ?, ?> source : sourceNodesByTopic.values()) {
+        for (final SourceNode<?, ?> source : sourceNodesByTopic.values()) {
             sourceNodesByName.put(source.name(), source);
         }
     }
@@ -78,11 +80,11 @@ public class ProcessorTopology {
         return sourceNodesByTopic.keySet();
     }
 
-    public SourceNode<?, ?, ?, ?> source(final String topic) {
+    public SourceNode<?, ?> source(final String topic) {
         return sourceNodesByTopic.get(topic);
     }
 
-    public Set<SourceNode<?, ?, ?, ?>> sources() {
+    public Set<SourceNode<?, ?>> sources() {
         return new HashSet<>(sourceNodesByTopic.values());
     }
 
@@ -90,7 +92,7 @@ public class ProcessorTopology {
         return sinksByTopic.keySet();
     }
 
-    public SinkNode<?, ?, ?, ?> sink(final String topic) {
+    public SinkNode<?, ?> sink(final String topic) {
         return sinksByTopic.get(topic);
     }
 
@@ -106,8 +108,8 @@ public class ProcessorTopology {
         return stateStores;
     }
 
-    public boolean hasStore(final String storeName) {
-        return stateStoreNames.contains(storeName);
+    public Map<String, Optional<InternalTopologyBuilder.ReprocessFactory<?, ?, ?, ?>>> storeNameToReprocessOnRestore() {
+        return storeNameToReprocessOnRestore;
     }
 
     public List<StateStore> globalStateStores() {
@@ -151,9 +153,9 @@ public class ProcessorTopology {
 
     public void updateSourceTopics(final Map<String, List<String>> allSourceTopicsByNodeName) {
         sourceNodesByTopic.clear();
-        for (final Map.Entry<String, SourceNode<?, ?, ?, ?>> sourceNodeEntry : sourceNodesByName.entrySet()) {
+        for (final Map.Entry<String, SourceNode<?, ?>> sourceNodeEntry : sourceNodesByName.entrySet()) {
             final String sourceNodeName = sourceNodeEntry.getKey();
-            final SourceNode<?, ?, ?, ?> sourceNode = sourceNodeEntry.getValue();
+            final SourceNode<?, ?> sourceNode = sourceNodeEntry.getValue();
 
             final List<String> updatedSourceTopics = allSourceTopicsByNodeName.get(sourceNodeName);
             if (updatedSourceTopics == null) {
@@ -211,10 +213,10 @@ public class ProcessorTopology {
      * @return A string representation of this instance.
      */
     public String toString(final String indent) {
-        final Map<SourceNode<?, ?, ?, ?>, List<String>> sourceToTopics = new HashMap<>();
-        for (final Map.Entry<String, SourceNode<?, ?, ?, ?>> sourceNodeEntry : sourceNodesByTopic.entrySet()) {
+        final Map<SourceNode<?, ?>, List<String>> sourceToTopics = new HashMap<>();
+        for (final Map.Entry<String, SourceNode<?, ?>> sourceNodeEntry : sourceNodesByTopic.entrySet()) {
             final String topic = sourceNodeEntry.getKey();
-            final SourceNode<?, ?, ?, ?> source = sourceNodeEntry.getValue();
+            final SourceNode<?, ?> source = sourceNodeEntry.getValue();
             sourceToTopics.computeIfAbsent(source, s -> new ArrayList<>());
             sourceToTopics.get(source).add(topic);
         }
@@ -222,8 +224,8 @@ public class ProcessorTopology {
         final StringBuilder sb = new StringBuilder(indent + "ProcessorTopology:\n");
 
         // start from sources
-        for (final Map.Entry<SourceNode<?, ?, ?, ?>, List<String>> sourceNodeEntry : sourceToTopics.entrySet()) {
-            final SourceNode<?, ?, ?, ?> source = sourceNodeEntry.getKey();
+        for (final Map.Entry<SourceNode<?, ?>, List<String>> sourceNodeEntry : sourceToTopics.entrySet()) {
+            final SourceNode<?, ?> source = sourceNodeEntry.getKey();
             final List<String> topics = sourceNodeEntry.getValue();
             sb.append(source.toString(indent + "\t"))
                 .append(topicsToString(indent + "\t", topics))

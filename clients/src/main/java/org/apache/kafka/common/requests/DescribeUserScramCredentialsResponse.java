@@ -18,10 +18,9 @@ package org.apache.kafka.common.requests;
 
 import org.apache.kafka.common.message.DescribeUserScramCredentialsResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.protocol.Readable;
 
-import java.nio.ByteBuffer;
 import java.util.Map;
 
 public class DescribeUserScramCredentialsResponse extends AbstractResponse {
@@ -49,11 +48,16 @@ public class DescribeUserScramCredentialsResponse extends AbstractResponse {
     }
 
     @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
+    }
+
+    @Override
     public Map<Errors, Integer> errorCounts() {
         return errorCounts(data.results().stream().map(r -> Errors.forCode(r.errorCode())));
     }
 
-    public static DescribeUserScramCredentialsResponse parse(ByteBuffer buffer, short version) {
-        return new DescribeUserScramCredentialsResponse(new DescribeUserScramCredentialsResponseData(new ByteBufferAccessor(buffer), version));
+    public static DescribeUserScramCredentialsResponse parse(Readable readable, short version) {
+        return new DescribeUserScramCredentialsResponse(new DescribeUserScramCredentialsResponseData(readable, version));
     }
 }

@@ -25,11 +25,7 @@ import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.StreamsMetrics;
-import org.apache.kafka.streams.Topology;
-import org.apache.kafka.streams.TopologyTestDriver;
 import org.apache.kafka.streams.internals.ApiUtils;
-import org.apache.kafka.streams.kstream.Transformer;
-import org.apache.kafka.streams.kstream.ValueTransformer;
 import org.apache.kafka.streams.processor.internals.ClientUtils;
 import org.apache.kafka.streams.processor.internals.RecordCollector;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
@@ -45,17 +41,18 @@ import java.util.Map;
 import java.util.Properties;
 
 /**
- * {@link MockProcessorContext} is a mock of {@link ProcessorContext} for users to test their {@link Processor},
- * {@link Transformer}, and {@link ValueTransformer} implementations.
+ * {@link MockProcessorContext} is a mock of {@link ProcessorContext} for users to test their
+ * {@link org.apache.kafka.streams.kstream.ValueTransformer} implementations.
  * <p>
  * The tests for this class (org.apache.kafka.streams.MockProcessorContextTest) include several behavioral
  * tests that serve as example usage.
  * <p>
  * Note that this class does not take any automated actions (such as firing scheduled punctuators).
  * It simply captures any data it witnesses.
- * If you require more automated tests, we recommend wrapping your {@link Processor} in a minimal source-processor-sink
- * {@link Topology} and using the {@link TopologyTestDriver}.
+ *
+ * @deprecated Since 4.0. Use {@link org.apache.kafka.streams.processor.api.MockProcessorContext} instead.
  */
+@Deprecated
 public class MockProcessorContext implements ProcessorContext, RecordCollector.Supplier {
     // Immutable fields ================================================
     private final StreamsMetricsImpl metrics;
@@ -124,9 +121,10 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
     public static class CapturedForward {
         private final String childName;
         private final long timestamp;
-        private final KeyValue keyValue;
+        private final Headers headers;
+        private final KeyValue<?, ?> keyValue;
 
-        private CapturedForward(final To to, final KeyValue keyValue) {
+        private CapturedForward(final KeyValue<?, ?> keyValue, final To to, final Headers headers) {
             if (keyValue == null) {
                 throw new IllegalArgumentException();
             }
@@ -134,6 +132,7 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
             this.childName = to.childName;
             this.timestamp = to.timestamp;
             this.keyValue = keyValue;
+            this.headers = headers;
         }
 
         /**
@@ -161,7 +160,7 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
          *
          * @return A key/value pair. Not null.
          */
-        @SuppressWarnings({"WeakerAccess", "unused"})
+        @SuppressWarnings({"WeakerAccess", "unused", "rawtypes"})
         public KeyValue keyValue() {
             return keyValue;
         }
@@ -173,6 +172,10 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
                 ", timestamp=" + timestamp +
                 ", keyValue=" + keyValue +
                 '}';
+        }
+
+        public Headers headers() {
+            return this.headers;
         }
     }
 
@@ -191,7 +194,7 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
             new Properties() {
                 {
                     put(StreamsConfig.APPLICATION_ID_CONFIG, "");
-                    put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "");
+                    put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "mock-localhost:9092");
                 }
             },
             new TaskId(0, 0),
@@ -232,12 +235,13 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
         metricConfig.recordLevel(Sensor.RecordingLevel.DEBUG);
         final String threadId = Thread.currentThread().getName();
         this.metrics = new StreamsMetricsImpl(
-            new Metrics(metricConfig),
-            threadId,
-            streamsConfig.getString(StreamsConfig.BUILT_IN_METRICS_VERSION_CONFIG),
-            Time.SYSTEM
+                new Metrics(metricConfig),
+                threadId,
+                "processId",
+                "applicationId",
+                Time.SYSTEM
         );
-        TaskMetrics.droppedRecordsSensorOrSkippedRecordsSensor(threadId, taskId.toString(), metrics);
+        TaskMetrics.droppedRecordsSensor(threadId, taskId.toString(), metrics);
     }
 
     @Override
@@ -367,18 +371,6 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
         this.headers = headers;
     }
 
-    /**
-     * The context exposes this metadata for use in the processor. Normally, they are set by the Kafka Streams framework,
-     * but for the purpose of driving unit tests, you can set it directly. Setting this attribute doesn't affect the others.
-     *
-     * @param timestamp A record timestamp
-     * @deprecated Since 3.0.0; use {@link MockProcessorContext#setRecordTimestamp(long)} instead.
-     */
-    @Deprecated
-    @SuppressWarnings({"WeakerAccess", "unused"})
-    public void setTimestamp(final long timestamp) {
-        this.recordTimestamp = timestamp;
-    }
 
     /**
      * The context exposes this metadata for use in the processor. Normally, they are set by the Kafka Streams framework,
@@ -423,6 +415,18 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
         return offset;
     }
 
+    /**
+     * Returns the headers of the current input record; could be {@code null} if it is not
+     * available.
+     *
+     * <p> Note, that headers should never be {@code null} in the actual Kafka Streams runtime,
+     * even if they could be empty. However, this mock does not guarantee non-{@code null} headers.
+     * Thus, you either need to add a {@code null} check to your production code to use this mock
+     * for testing, or you always need to set headers manually via {@link #setHeaders(Headers)} to
+     * avoid a {@link NullPointerException} from your {@link org.apache.kafka.streams.kstream.ValueTransformer}implementation.
+     *
+     * @return the headers
+     */
     @Override
     public Headers headers() {
         return headers;
@@ -431,7 +435,7 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
     @Override
     public long timestamp() {
         if (recordTimestamp == null) {
-            throw new IllegalStateException("Timestamp must be set before use via setRecordMetadata() or setTimestamp().");
+            throw new IllegalStateException("Timestamp must be set before use via setRecordMetadata() or setRecordTimestamp().");
         }
         return recordTimestamp;
     }
@@ -451,23 +455,18 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
     }
 
     @Override
-    @Deprecated
-    public Cancellable schedule(final long intervalMs,
+    public Cancellable schedule(final Duration interval,
                                 final PunctuationType type,
-                                final Punctuator callback) {
+                                final Punctuator callback) throws IllegalArgumentException {
+        final long intervalMs = ApiUtils.validateMillisecondDuration(interval, "interval");
+        if (intervalMs < 1) {
+            throw new IllegalArgumentException("The minimum supported scheduling interval is 1 millisecond.");
+        }
         final CapturedPunctuator capturedPunctuator = new CapturedPunctuator(intervalMs, type, callback);
 
         punctuators.add(capturedPunctuator);
 
         return capturedPunctuator::cancel;
-    }
-
-    @SuppressWarnings("deprecation") // removing #schedule(final long intervalMs,...) will fix this
-    @Override
-    public Cancellable schedule(final Duration interval,
-                                final PunctuationType type,
-                                final Punctuator callback) throws IllegalArgumentException {
-        return schedule(ApiUtils.validateMillisecondDuration(interval, "interval"), type, callback);
     }
 
     /**
@@ -489,8 +488,9 @@ public class MockProcessorContext implements ProcessorContext, RecordCollector.S
     public <K, V> void forward(final K key, final V value, final To to) {
         capturedForwards.add(
             new CapturedForward(
+                new KeyValue<>(key, value),
                 to.timestamp == -1 ? to.withTimestamp(recordTimestamp == null ? -1 : recordTimestamp) : to,
-                new KeyValue<>(key, value)
+                headers
             )
         );
     }

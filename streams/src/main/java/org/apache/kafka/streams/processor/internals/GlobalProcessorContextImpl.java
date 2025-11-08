@@ -25,16 +25,18 @@ import org.apache.kafka.streams.processor.Punctuator;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.To;
+import org.apache.kafka.streams.processor.api.FixedKeyRecord;
 import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
+import org.apache.kafka.streams.query.Position;
 import org.apache.kafka.streams.state.internals.ThreadCache;
 import org.apache.kafka.streams.state.internals.ThreadCache.DirtyEntryFlushListener;
 
 import java.time.Duration;
 
-import static org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator.getReadWriteStore;
+import static org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator.wrapWithReadWriteStore;
 
-public class GlobalProcessorContextImpl extends AbstractProcessorContext {
+public class GlobalProcessorContextImpl extends AbstractProcessorContext<Object, Object> {
 
     private final GlobalStateManager stateManager;
     private final Time time;
@@ -57,8 +59,8 @@ public class GlobalProcessorContextImpl extends AbstractProcessorContext {
     @SuppressWarnings("unchecked")
     @Override
     public <S extends StateStore> S getStateStore(final String name) {
-        final StateStore store = stateManager.getGlobalStore(name);
-        return (S) getReadWriteStore(store);
+        final StateStore store = stateManager.globalStore(name);
+        return (S) wrapWithReadWriteStore(store);
     }
 
     @SuppressWarnings("unchecked")
@@ -82,7 +84,7 @@ public class GlobalProcessorContextImpl extends AbstractProcessorContext {
 
     @Override
     public <KIn, VIn> void forward(final KIn key, final VIn value) {
-        forward(new Record<>(key, value, timestamp(), headers()));
+        forward(new Record<>(key, value, recordContext().timestamp(), headers()));
     }
 
     /**
@@ -93,6 +95,19 @@ public class GlobalProcessorContextImpl extends AbstractProcessorContext {
         if (!currentNode().children().isEmpty()) {
             throw new IllegalStateException("This method should only be called on 'GlobalStateStore.flush' that should not have any children.");
         }
+    }
+
+    @Override
+    public <K, V> void forward(final FixedKeyRecord<K, V> record) {
+        forward(new Record<>(record.key(), record.value(), record.timestamp(), record.headers()));
+    }
+
+    @Override
+    public <K, V> void forward(final FixedKeyRecord<K, V> record, final String childName) {
+        forward(
+            new Record<>(record.key(), record.value(), record.timestamp(), record.headers()),
+            childName
+        );
     }
 
     @Override
@@ -114,15 +129,6 @@ public class GlobalProcessorContextImpl extends AbstractProcessorContext {
      * @throws UnsupportedOperationException on every invocation
      */
     @Override
-    @Deprecated
-    public Cancellable schedule(final long interval, final PunctuationType type, final Punctuator callback) {
-        throw new UnsupportedOperationException("this should not happen: schedule() not supported in global processor context.");
-    }
-
-    /**
-     * @throws UnsupportedOperationException on every invocation
-     */
-    @Override
     public Cancellable schedule(final Duration interval, final PunctuationType type, final Punctuator callback) {
         throw new UnsupportedOperationException("this should not happen: schedule() not supported in global processor context.");
     }
@@ -131,7 +137,8 @@ public class GlobalProcessorContextImpl extends AbstractProcessorContext {
     public void logChange(final String storeName,
                           final Bytes key,
                           final byte[] value,
-                          final long timestamp) {
+                          final long timestamp,
+                          final Position position) {
         throw new UnsupportedOperationException("this should not happen: logChange() not supported in global processor context.");
     }
 

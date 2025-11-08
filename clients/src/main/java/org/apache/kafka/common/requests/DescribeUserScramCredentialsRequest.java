@@ -19,9 +19,7 @@ package org.apache.kafka.common.requests;
 import org.apache.kafka.common.message.DescribeUserScramCredentialsRequestData;
 import org.apache.kafka.common.message.DescribeUserScramCredentialsResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
-
-import java.nio.ByteBuffer;
+import org.apache.kafka.common.protocol.Readable;
 
 public class DescribeUserScramCredentialsRequest extends AbstractRequest {
 
@@ -45,17 +43,15 @@ public class DescribeUserScramCredentialsRequest extends AbstractRequest {
     }
 
     private final DescribeUserScramCredentialsRequestData data;
-    private final short version;
 
     private DescribeUserScramCredentialsRequest(DescribeUserScramCredentialsRequestData data, short version) {
         super(ApiKeys.DESCRIBE_USER_SCRAM_CREDENTIALS, version);
         this.data = data;
-        this.version = version;
     }
 
-    public static DescribeUserScramCredentialsRequest parse(ByteBuffer buffer, short version) {
+    public static DescribeUserScramCredentialsRequest parse(Readable readable, short version) {
         return new DescribeUserScramCredentialsRequest(new DescribeUserScramCredentialsRequestData(
-                new ByteBufferAccessor(buffer), version), version);
+                readable, version), version);
     }
 
     @Override
@@ -66,8 +62,16 @@ public class DescribeUserScramCredentialsRequest extends AbstractRequest {
     @Override
     public AbstractResponse getErrorResponse(int throttleTimeMs, Throwable e) {
         ApiError apiError = ApiError.fromThrowable(e);
-        return new DescribeUserScramCredentialsResponse(new DescribeUserScramCredentialsResponseData()
+        DescribeUserScramCredentialsResponseData response = new DescribeUserScramCredentialsResponseData()
+                .setThrottleTimeMs(throttleTimeMs)
                 .setErrorCode(apiError.error().code())
-                .setErrorMessage(apiError.message()));
+                .setErrorMessage(apiError.message());
+
+        data.users().forEach(__ ->
+            response.results().add(new DescribeUserScramCredentialsResponseData.DescribeUserScramCredentialsResult()
+                .setErrorCode(apiError.error().code())
+                .setErrorMessage(apiError.message()))
+        );
+        return new DescribeUserScramCredentialsResponse(response);
     }
 }

@@ -17,18 +17,18 @@
 
 package org.apache.kafka.common.requests;
 
-import java.nio.ByteBuffer;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.message.ElectLeadersResponseData;
+import org.apache.kafka.common.message.ElectLeadersResponseData.ReplicaElectionResult;
+import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.protocol.Readable;
+
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-
-import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.message.ElectLeadersResponseData;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
-import org.apache.kafka.common.message.ElectLeadersResponseData.ReplicaElectionResult;
-import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.Errors;
 
 public class ElectLeadersResponse extends AbstractResponse {
 
@@ -63,8 +63,13 @@ public class ElectLeadersResponse extends AbstractResponse {
     }
 
     @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
+    }
+
+    @Override
     public Map<Errors, Integer> errorCounts() {
-        HashMap<Errors, Integer> counts = new HashMap<>();
+        Map<Errors, Integer> counts = new EnumMap<>(Errors.class);
         updateErrorCounts(counts, Errors.forCode(data.errorCode()));
         data.replicaElectionResults().forEach(result ->
             result.partitionResult().forEach(partitionResult ->
@@ -74,8 +79,8 @@ public class ElectLeadersResponse extends AbstractResponse {
         return counts;
     }
 
-    public static ElectLeadersResponse parse(ByteBuffer buffer, short version) {
-        return new ElectLeadersResponse(new ElectLeadersResponseData(new ByteBufferAccessor(buffer), version));
+    public static ElectLeadersResponse parse(Readable readable, short version) {
+        return new ElectLeadersResponse(new ElectLeadersResponseData(readable, version));
     }
 
     @Override

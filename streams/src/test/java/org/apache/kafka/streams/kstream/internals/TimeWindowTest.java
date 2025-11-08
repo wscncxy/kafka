@@ -17,20 +17,21 @@
 package org.apache.kafka.streams.kstream.internals;
 
 import org.apache.kafka.streams.kstream.TimeWindows;
-import org.junit.Test;
+
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
 import static java.time.Duration.ofMillis;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TimeWindowTest {
 
-    private long start = 50;
-    private long end = 100;
+    private final long start = 50;
+    private final long end = 100;
     private final TimeWindow window = new TimeWindow(start, end);
     private final SessionWindow sessionWindow = new SessionWindow(start, end);
 
@@ -126,12 +127,12 @@ public class TimeWindowTest {
 
     @Test
     public void shouldReturnMatchedWindowsOrderedByTimestamp() {
-        final TimeWindows windows = TimeWindows.of(ofMillis(12L)).advanceBy(ofMillis(5L));
+        final TimeWindows windows = TimeWindows.ofSizeWithNoGrace(ofMillis(12L)).advanceBy(ofMillis(5L));
         final Map<Long, TimeWindow> matched = windows.windowsFor(21L);
 
-        final Long[] expected = matched.keySet().toArray(new Long[0]);
-        assertEquals(expected[0].longValue(), 10L);
-        assertEquals(expected[1].longValue(), 15L);
-        assertEquals(expected[2].longValue(), 20L);
+        final Long[] actual = matched.keySet().toArray(new Long[0]);
+        assertEquals(10L, actual[0].longValue());
+        assertEquals(15L, actual[1].longValue());
+        assertEquals(20L, actual[2].longValue());
     }
 }

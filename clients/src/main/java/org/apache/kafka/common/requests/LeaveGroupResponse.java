@@ -16,14 +16,14 @@
  */
 package org.apache.kafka.common.requests;
 
+import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.LeaveGroupResponseData;
 import org.apache.kafka.common.message.LeaveGroupResponseData.MemberResponse;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.protocol.Readable;
 
-import java.nio.ByteBuffer;
-import java.util.HashMap;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -55,6 +55,23 @@ public class LeaveGroupResponse extends AbstractResponse {
         this.data = data;
     }
 
+    public LeaveGroupResponse(LeaveGroupResponseData data, short version) {
+        super(ApiKeys.LEAVE_GROUP);
+
+        if (version >= 3) {
+            this.data = data;
+        } else if (data.errorCode() != Errors.NONE.code()) {
+            this.data = new LeaveGroupResponseData().setErrorCode(data.errorCode());
+        } else {
+            if (data.members().size() != 1) {
+                throw new UnsupportedVersionException("LeaveGroup response version " + version +
+                    " can only contain one member, got " + data.members().size() + " members.");
+            }
+
+            this.data = new LeaveGroupResponseData().setErrorCode(data.members().get(0).errorCode());
+        }
+    }
+
     public LeaveGroupResponse(List<MemberResponse> memberResponses,
                               Errors topLevelError,
                               final int throttleTimeMs,
@@ -80,6 +97,11 @@ public class LeaveGroupResponse extends AbstractResponse {
     @Override
     public int throttleTimeMs() {
         return data.throttleTimeMs();
+    }
+
+    @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
     }
 
     public List<MemberResponse> memberResponses() {
@@ -110,14 +132,14 @@ public class LeaveGroupResponse extends AbstractResponse {
 
     @Override
     public Map<Errors, Integer> errorCounts() {
-        Map<Errors, Integer> combinedErrorCounts = new HashMap<>();
+        Map<Errors, Integer> combinedErrorCounts = new EnumMap<>(Errors.class);
         // Top level error.
         updateErrorCounts(combinedErrorCounts, Errors.forCode(data.errorCode()));
 
         // Member level error.
-        data.members().forEach(memberResponse -> {
-            updateErrorCounts(combinedErrorCounts, Errors.forCode(memberResponse.errorCode()));
-        });
+        data.members().forEach(memberResponse ->
+            updateErrorCounts(combinedErrorCounts, Errors.forCode(memberResponse.errorCode()))
+        );
         return combinedErrorCounts;
     }
 
@@ -126,8 +148,8 @@ public class LeaveGroupResponse extends AbstractResponse {
         return data;
     }
 
-    public static LeaveGroupResponse parse(ByteBuffer buffer, short version) {
-        return new LeaveGroupResponse(new LeaveGroupResponseData(new ByteBufferAccessor(buffer), version));
+    public static LeaveGroupResponse parse(Readable readable, short version) {
+        return new LeaveGroupResponse(new LeaveGroupResponseData(readable, version));
     }
 
     @Override

@@ -16,36 +16,38 @@
  */
 package org.apache.kafka.streams.kstream;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import static java.time.Duration.ofMillis;
 import static org.apache.kafka.streams.EqualityCheck.verifyEquality;
 import static org.apache.kafka.streams.EqualityCheck.verifyInEquality;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class SlidingWindowsTest {
 
     private static final long ANY_SIZE = 123L;
+    private static final long ANY_GRACE = 1024L;
 
     @Test
     public void shouldSetTimeDifference() {
-        assertEquals(ANY_SIZE, SlidingWindows.withTimeDifferenceAndGrace(ofMillis(ANY_SIZE), ofMillis(3)).timeDifferenceMs());
+        assertEquals(ANY_SIZE, SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(ANY_SIZE), ofMillis(ANY_GRACE)).timeDifferenceMs());
+        assertEquals(ANY_SIZE, SlidingWindows.ofTimeDifferenceWithNoGrace(ofMillis(ANY_SIZE)).timeDifferenceMs());
     }
 
     @Test
     public void timeDifferenceMustNotBeNegative() {
-        assertThrows(IllegalArgumentException.class, () ->  SlidingWindows.withTimeDifferenceAndGrace(ofMillis(-1), ofMillis(5)));
+        assertThrows(IllegalArgumentException.class, () ->  SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(-1), ofMillis(5)));
     }
 
     @Test
     public void shouldSetGracePeriod() {
-        assertEquals(ANY_SIZE, SlidingWindows.withTimeDifferenceAndGrace(ofMillis(10), ofMillis(ANY_SIZE)).gracePeriodMs());
+        assertEquals(ANY_SIZE, SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(10), ofMillis(ANY_SIZE)).gracePeriodMs());
     }
 
     @Test
     public void gracePeriodMustNotBeNegative() {
-        assertThrows(IllegalArgumentException.class, () ->  SlidingWindows.withTimeDifferenceAndGrace(ofMillis(10), ofMillis(-1)));
+        assertThrows(IllegalArgumentException.class, () ->  SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(10), ofMillis(-1)));
     }
 
     @Test
@@ -53,8 +55,18 @@ public class SlidingWindowsTest {
         final long grace = 1L + (long) (Math.random() * (20L - 1L));
         final long timeDifference = 1L + (long) (Math.random() * (20L - 1L));
         verifyEquality(
-                SlidingWindows.withTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(grace)),
-                SlidingWindows.withTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(grace))
+                SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(grace)),
+                SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(grace))
+        );
+
+        verifyEquality(
+                SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(grace)),
+                SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(grace))
+        );
+
+        verifyEquality(
+                SlidingWindows.ofTimeDifferenceWithNoGrace(ofMillis(timeDifference)),
+                SlidingWindows.ofTimeDifferenceWithNoGrace(ofMillis(timeDifference))
         );
     }
 
@@ -64,8 +76,8 @@ public class SlidingWindowsTest {
         final long timeDifferenceOne = 1L + (long) (Math.random() * (10L - 1L));
         final long timeDifferenceTwo = 21L + (long) (Math.random() * (41L - 21L));
         verifyInEquality(
-                SlidingWindows.withTimeDifferenceAndGrace(ofMillis(timeDifferenceOne), ofMillis(grace)),
-                SlidingWindows.withTimeDifferenceAndGrace(ofMillis(timeDifferenceTwo), ofMillis(grace))
+                SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(timeDifferenceOne), ofMillis(grace)),
+                SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(timeDifferenceTwo), ofMillis(grace))
         );
     }
 
@@ -75,8 +87,8 @@ public class SlidingWindowsTest {
         final long graceOne = 1L + (long) (Math.random() * (10L - 1L));
         final long graceTwo = 21L + (long) (Math.random() * (41L - 21L));
         verifyInEquality(
-                SlidingWindows.withTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(graceOne)),
-                SlidingWindows.withTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(graceTwo))
+                SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(graceOne)),
+                SlidingWindows.ofTimeDifferenceAndGrace(ofMillis(timeDifference), ofMillis(graceTwo))
         );
     }
 }

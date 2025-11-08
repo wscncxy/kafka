@@ -17,21 +17,23 @@
 
 package org.apache.kafka.streams.tests;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
+@Timeout(600)
 public class SystemTestUtilTest {
 
     private final Map<String, String> expectedParsedMap = new TreeMap<>();
 
-    @Before
+    @BeforeEach
     public void setUp() {
         expectedParsedMap.put("foo", "foo1");
         expectedParsedMap.put("bar", "bar1");

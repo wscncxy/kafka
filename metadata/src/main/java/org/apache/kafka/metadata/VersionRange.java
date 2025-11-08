@@ -23,14 +23,22 @@ import java.util.Objects;
  * An immutable class which represents version ranges.
  */
 public class VersionRange {
-    public final static VersionRange ALL = new VersionRange((short) 0, Short.MAX_VALUE);
+    public static final VersionRange ALL = of((short) 0, Short.MAX_VALUE);
 
     private final short min;
     private final short max;
 
-    public VersionRange(short min, short max) {
+    private VersionRange(short min, short max) {
         this.min = min;
         this.max = max;
+    }
+
+    public static VersionRange of(short min, short max) {
+        return new VersionRange(min, max);
+    }
+
+    public static VersionRange of(int min, int max) {
+        return new VersionRange((short) min, (short) max);
     }
 
     public short min() {
@@ -41,8 +49,11 @@ public class VersionRange {
         return max;
     }
 
-    public boolean contains(VersionRange other) {
-        return other.min >= min && other.max <= max;
+    /**
+     * Check if a given version is fully contained within this range
+     */
+    public boolean contains(short version) {
+        return version >= min && version <= max;
     }
 
     @Override
@@ -52,8 +63,7 @@ public class VersionRange {
 
     @Override
     public boolean equals(Object o) {
-        if (!(o instanceof VersionRange)) return false;
-        VersionRange other = (VersionRange) o;
+        if (!(o instanceof VersionRange other)) return false;
         return other.min == min && other.max == max;
     }
 

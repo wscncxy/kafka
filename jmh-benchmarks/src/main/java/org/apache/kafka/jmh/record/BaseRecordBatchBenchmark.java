@@ -16,20 +16,24 @@
  */
 package org.apache.kafka.jmh.record;
 
-import kafka.server.BrokerTopicStats;
+import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.record.AbstractRecords;
-import org.apache.kafka.common.utils.BufferSupplier;
-import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.Record;
 import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.record.TimestampType;
+import org.apache.kafka.server.common.RequestLocal;
+import org.apache.kafka.storage.internals.log.LogValidator;
+import org.apache.kafka.storage.internals.log.UnifiedLog;
+import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
+
 import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
+import org.openjdk.jmh.annotations.TearDown;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -74,8 +78,9 @@ public abstract class BaseRecordBatchBenchmark {
 
     // Used by measureVariableBatchSize
     ByteBuffer[] batchBuffers;
-    BufferSupplier bufferSupplier;
-    final BrokerTopicStats brokerTopicStats = new BrokerTopicStats();
+    RequestLocal requestLocal;
+    LogValidator.MetricsRecorder validatorMetricsRecorder = UnifiedLog.newValidatorMetricsRecorder(
+        new BrokerTopicStats(false).allTopicsStats());
 
     @Setup
     public void init() {
@@ -85,9 +90,9 @@ public abstract class BaseRecordBatchBenchmark {
         startingOffset = messageVersion == 2 ? 0 : 42;
 
         if (bufferSupplierStr.equals("NO_CACHING")) {
-            bufferSupplier = BufferSupplier.NO_CACHING;
+            requestLocal = RequestLocal.noCaching();
         } else if (bufferSupplierStr.equals("CREATE")) {
-            bufferSupplier = BufferSupplier.create();
+            requestLocal = RequestLocal.withThreadConfinedCaching();
         } else {
             throw new IllegalArgumentException("Unsupported buffer supplier " + bufferSupplierStr);
         }
@@ -98,6 +103,12 @@ public abstract class BaseRecordBatchBenchmark {
             int size = random.nextInt(maxBatchSize) + 1;
             batchBuffers[i] = createBatch(size);
         }
+    }
+
+    @TearDown
+    public void cleanUp() {
+        if (requestLocal != null)
+            requestLocal.close();
     }
 
     private static Header[] createHeaders() {
@@ -118,19 +129,19 @@ public abstract class BaseRecordBatchBenchmark {
         }).toArray(Header[]::new);
     }
 
-    abstract CompressionType compressionType();
+    abstract Compression compression();
 
     private ByteBuffer createBatch(int batchSize) {
         // Magic v1 does not support record headers
         Header[] headers = messageVersion < RecordBatch.MAGIC_VALUE_V2 ? Record.EMPTY_HEADERS : createHeaders();
         byte[] value = new byte[messageSize];
         final ByteBuffer buf = ByteBuffer.allocate(
-            AbstractRecords.estimateSizeInBytesUpperBound(messageVersion, compressionType(), new byte[0], value,
+            AbstractRecords.estimateSizeInBytesUpperBound(messageVersion, compression().type(), new byte[0], value,
                     headers) * batchSize
         );
 
         final MemoryRecordsBuilder builder =
-            MemoryRecords.builder(buf, messageVersion, compressionType(), TimestampType.CREATE_TIME, startingOffset);
+            MemoryRecords.builder(buf, messageVersion, compression(), TimestampType.CREATE_TIME, startingOffset);
 
         for (int i = 0; i < batchSize; ++i) {
             switch (bytes) {

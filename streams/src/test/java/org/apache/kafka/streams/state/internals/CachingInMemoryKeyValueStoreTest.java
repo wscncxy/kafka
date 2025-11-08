@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.streams.state.internals;
 
+import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -24,64 +25,71 @@ import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.errors.InvalidStateStoreException;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.internals.MockStreamsMetrics;
 import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
+import org.apache.kafka.streams.query.Position;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.Stores;
 import org.apache.kafka.test.InternalMockProcessorContext;
 import org.apache.kafka.test.TestUtils;
-import org.easymock.EasyMock;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import static org.apache.kafka.common.utils.Utils.mkEntry;
+import static org.apache.kafka.common.utils.Utils.mkMap;
 import static org.apache.kafka.streams.state.internals.ThreadCacheTest.memoryCacheEntrySize;
 import static org.hamcrest.CoreMatchers.equalTo;
-import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.STRICT_STUBS)
 public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest {
 
-    private final static String TOPIC = "topic";
+    private static final String TOPIC = "topic";
     private static final String CACHE_NAMESPACE = "0_0-store-name";
     private final int maxCacheSizeBytes = 150;
-    private InternalMockProcessorContext context;
+    private InternalMockProcessorContext<?, ?> context;
     private CachingKeyValueStore store;
     private KeyValueStore<Bytes, byte[]> underlyingStore;
     private ThreadCache cache;
     private CacheFlushListenerStub<String, String> cacheFlushListener;
 
-    @Before
+    @BeforeEach
     public void setUp() {
         final String storeName = "store";
         underlyingStore = new InMemoryKeyValueStore(storeName);
         cacheFlushListener = new CacheFlushListenerStub<>(new StringDeserializer(), new StringDeserializer());
-        store = new CachingKeyValueStore(underlyingStore);
+        store = new CachingKeyValueStore(underlyingStore, false);
         store.setFlushListener(cacheFlushListener, false);
         cache = new ThreadCache(new LogContext("testCache "), maxCacheSizeBytes, new MockStreamsMetrics(new Metrics()));
-        context = new InternalMockProcessorContext(null, null, null, null, cache);
-        context.setRecordContext(new ProcessorRecordContext(10, 0, 0, TOPIC, null));
-        store.init((StateStoreContext) context, null);
-    }
-
-    @After
-    public void after() {
-        super.after();
+        context = new InternalMockProcessorContext<>(null, null, null, null, cache);
+        context.setRecordContext(new ProcessorRecordContext(10, 0, 0, TOPIC, new RecordHeaders()));
+        store.init(context, null);
     }
 
     @SuppressWarnings("unchecked")
@@ -98,29 +106,13 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
         return store;
     }
 
-    @SuppressWarnings("deprecation")
-    @Test
-    public void shouldDelegateDeprecatedInit() {
-        final KeyValueStore<Bytes, byte[]> inner = EasyMock.mock(InMemoryKeyValueStore.class);
-        final CachingKeyValueStore outer = new CachingKeyValueStore(inner);
-        EasyMock.expect(inner.name()).andStubReturn("store");
-        inner.init((ProcessorContext) context, outer);
-        EasyMock.expectLastCall();
-        EasyMock.replay(inner);
-        outer.init((ProcessorContext) context, outer);
-        EasyMock.verify(inner);
-    }
-
     @Test
     public void shouldDelegateInit() {
-        final KeyValueStore<Bytes, byte[]> inner = EasyMock.mock(InMemoryKeyValueStore.class);
-        final CachingKeyValueStore outer = new CachingKeyValueStore(inner);
-        EasyMock.expect(inner.name()).andStubReturn("store");
-        inner.init((StateStoreContext) context, outer);
-        EasyMock.expectLastCall();
-        EasyMock.replay(inner);
-        outer.init((StateStoreContext) context, outer);
-        EasyMock.verify(inner);
+        final KeyValueStore<Bytes, byte[]> inner = mock(InMemoryKeyValueStore.class);
+        final CachingKeyValueStore outer = new CachingKeyValueStore(inner, false);
+        when(inner.name()).thenReturn("store");
+        outer.init(context, outer);
+        verify(inner).init(context, outer);
     }
 
     @Test
@@ -149,60 +141,48 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
     @Test
     public void shouldCloseWrappedStoreAndCacheAfterErrorDuringCacheFlush() {
         setUpCloseTests();
-        EasyMock.reset(cache);
-        cache.flush(CACHE_NAMESPACE);
-        EasyMock.expectLastCall().andThrow(new RuntimeException("Simulating an error on flush"));
-        EasyMock.replay(cache);
-        EasyMock.reset(underlyingStore);
-        underlyingStore.close();
-        EasyMock.replay(underlyingStore);
+        final InOrder inOrder = inOrder(cache, underlyingStore);
+        doThrow(new RuntimeException("Simulating an error on flush")).when(cache).flush(CACHE_NAMESPACE);
 
         assertThrows(RuntimeException.class, store::close);
-        EasyMock.verify(cache, underlyingStore);
+
+        inOrder.verify(cache).close(CACHE_NAMESPACE);
+        inOrder.verify(underlyingStore).close();
     }
 
     @Test
     public void shouldCloseWrappedStoreAfterErrorDuringCacheClose() {
         setUpCloseTests();
-        EasyMock.reset(cache);
-        cache.flush(CACHE_NAMESPACE);
-        cache.close(CACHE_NAMESPACE);
-        EasyMock.expectLastCall().andThrow(new RuntimeException("Simulating an error on close"));
-        EasyMock.replay(cache);
-        EasyMock.reset(underlyingStore);
-        underlyingStore.close();
-        EasyMock.replay(underlyingStore);
+        final InOrder inOrder = inOrder(cache, underlyingStore);
+        doThrow(new RuntimeException("Simulating an error on close")).when(cache).close(CACHE_NAMESPACE);
 
         assertThrows(RuntimeException.class, store::close);
-        EasyMock.verify(cache, underlyingStore);
+
+        inOrder.verify(cache).flush(CACHE_NAMESPACE);
+        inOrder.verify(underlyingStore).close();
     }
 
     @Test
     public void shouldCloseCacheAfterErrorDuringStateStoreClose() {
         setUpCloseTests();
-        EasyMock.reset(cache);
-        cache.flush(CACHE_NAMESPACE);
-        cache.close(CACHE_NAMESPACE);
-        EasyMock.replay(cache);
-        EasyMock.reset(underlyingStore);
-        underlyingStore.close();
-        EasyMock.expectLastCall().andThrow(new RuntimeException("Simulating an error on close"));
-        EasyMock.replay(underlyingStore);
+        final InOrder inOrder = inOrder(cache);
+        doThrow(new RuntimeException("Simulating an error on close")).when(underlyingStore).close();
 
         assertThrows(RuntimeException.class, store::close);
-        EasyMock.verify(cache, underlyingStore);
+
+        inOrder.verify(cache).flush(CACHE_NAMESPACE);
+        inOrder.verify(cache).close(CACHE_NAMESPACE);
     }
 
+    @SuppressWarnings("unchecked")
     private void setUpCloseTests() {
-        underlyingStore = EasyMock.createNiceMock(KeyValueStore.class);
-        EasyMock.expect(underlyingStore.name()).andStubReturn("store-name");
-        EasyMock.expect(underlyingStore.isOpen()).andStubReturn(true);
-        EasyMock.replay(underlyingStore);
-        store = new CachingKeyValueStore(underlyingStore);
-        cache = EasyMock.niceMock(ThreadCache.class);
-        context = new InternalMockProcessorContext(TestUtils.tempDirectory(), null, null, null, cache);
-        context.setRecordContext(new ProcessorRecordContext(10, 0, 0, TOPIC, null));
-        store.init((StateStoreContext) context, store);
+        underlyingStore = mock(KeyValueStore.class);
+        when(underlyingStore.name()).thenReturn("store-name");
+        store = new CachingKeyValueStore(underlyingStore, false);
+        cache = mock(ThreadCache.class);
+        context = new InternalMockProcessorContext<>(TestUtils.tempDirectory(), null, null, null, cache);
+        context.setRecordContext(new ProcessorRecordContext(10, 0, 0, TOPIC, new RecordHeaders()));
+        store.init(context, store);
     }
 
     @Test
@@ -214,6 +194,47 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
         // nothing evicted so underlying store should be empty
         assertEquals(2, cache.size());
         assertEquals(0, underlyingStore.approximateNumEntries());
+    }
+
+    @Test
+    public void shouldMatchPositionAfterPutWithFlushListener() {
+        store.setFlushListener(record -> { }, false);
+        shouldMatchPositionAfterPut();
+    }
+
+    @Test
+    public void shouldMatchPositionAfterPutWithoutFlushListener() {
+        store.setFlushListener(null, false);
+        shouldMatchPositionAfterPut();
+    }
+
+    private void shouldMatchPositionAfterPut() {
+        context.setRecordContext(new ProcessorRecordContext(0, 1, 0, "", new RecordHeaders()));
+        store.put(bytesKey("key1"), bytesValue("value1"));
+        context.setRecordContext(new ProcessorRecordContext(0, 2, 0, "", new RecordHeaders()));
+        store.put(bytesKey("key2"), bytesValue("value2"));
+
+        // Position should correspond to the last record's context, not the current context.
+        context.setRecordContext(
+            new ProcessorRecordContext(0, 3, 0, "", new RecordHeaders())
+        );
+
+        assertEquals(
+            Position.fromMap(mkMap(mkEntry("", mkMap(mkEntry(0, 2L))))),
+            store.getPosition()
+        );
+        assertEquals(Position.emptyPosition(), underlyingStore.getPosition());
+
+        store.flush();
+
+        assertEquals(
+            Position.fromMap(mkMap(mkEntry("", mkMap(mkEntry(0, 2L))))),
+            store.getPosition()
+        );
+        assertEquals(
+            Position.fromMap(mkMap(mkEntry("", mkMap(mkEntry(0, 2L))))),
+            underlyingStore.getPosition()
+        );
     }
 
     private byte[] bytesValue(final String value) {
@@ -298,44 +319,55 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
     @Test
     public void shouldIterateAllStoredItems() {
         final int items = addItemsToCache();
-        final KeyValueIterator<Bytes, byte[]> all = store.all();
         final List<Bytes> results = new ArrayList<>();
-        while (all.hasNext()) {
-            results.add(all.next().key);
+
+        try (final KeyValueIterator<Bytes, byte[]> all = store.all()) {
+            while (all.hasNext()) {
+                results.add(all.next().key);
+            }
         }
+
         assertEquals(items, results.size());
         assertEquals(Arrays.asList(
             Bytes.wrap("0".getBytes()),
             Bytes.wrap("1".getBytes()),
             Bytes.wrap("2".getBytes())
         ), results);
+
     }
 
     @Test
     public void shouldReverseIterateAllStoredItems() {
         final int items = addItemsToCache();
-        final KeyValueIterator<Bytes, byte[]> all = store.reverseAll();
         final List<Bytes> results = new ArrayList<>();
-        while (all.hasNext()) {
-            results.add(all.next().key);
+
+        try (final KeyValueIterator<Bytes, byte[]> all = store.reverseAll()) {
+            while (all.hasNext()) {
+                results.add(all.next().key);
+            }
         }
+
         assertEquals(items, results.size());
         assertEquals(Arrays.asList(
             Bytes.wrap("2".getBytes()),
             Bytes.wrap("1".getBytes()),
             Bytes.wrap("0".getBytes())
         ), results);
+
     }
 
     @Test
     public void shouldIterateOverRange() {
         final int items = addItemsToCache();
-        final KeyValueIterator<Bytes, byte[]> range =
-            store.range(bytesKey(String.valueOf(0)), bytesKey(String.valueOf(items)));
         final List<Bytes> results = new ArrayList<>();
-        while (range.hasNext()) {
-            results.add(range.next().key);
+
+        try (final KeyValueIterator<Bytes, byte[]> range =
+                 store.range(bytesKey(String.valueOf(0)), bytesKey(String.valueOf(items)))) {
+            while (range.hasNext()) {
+                results.add(range.next().key);
+            }
         }
+
         assertEquals(items, results.size());
         assertEquals(Arrays.asList(
             Bytes.wrap("0".getBytes()),
@@ -347,12 +379,15 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
     @Test
     public void shouldReverseIterateOverRange() {
         final int items = addItemsToCache();
-        final KeyValueIterator<Bytes, byte[]> range =
-            store.reverseRange(bytesKey(String.valueOf(0)), bytesKey(String.valueOf(items)));
         final List<Bytes> results = new ArrayList<>();
-        while (range.hasNext()) {
-            results.add(range.next().key);
+
+        try (final KeyValueIterator<Bytes, byte[]> range =
+                 store.reverseRange(bytesKey(String.valueOf(0)), bytesKey(String.valueOf(items)))) {
+            while (range.hasNext()) {
+                results.add(range.next().key);
+            }
         }
+
         assertEquals(items, results.size());
         assertEquals(Arrays.asList(
             Bytes.wrap("2".getBytes()),
@@ -373,20 +408,23 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
 
         store.putAll(entries);
 
-        final KeyValueIterator<Bytes, byte[]> keysWithPrefix = store.prefixScan("p1", new StringSerializer());
         final List<String> keys = new ArrayList<>();
         final List<String> values = new ArrayList<>();
         int numberOfKeysReturned = 0;
 
-        while (keysWithPrefix.hasNext()) {
-            final KeyValue<Bytes, byte[]> next = keysWithPrefix.next();
-            keys.add(next.key.toString());
-            values.add(new String(next.value));
-            numberOfKeysReturned++;
+        try (final KeyValueIterator<Bytes, byte[]> keysWithPrefix = store.prefixScan("p1", new StringSerializer())) {
+            while (keysWithPrefix.hasNext()) {
+                final KeyValue<Bytes, byte[]> next = keysWithPrefix.next();
+                keys.add(next.key.toString());
+                values.add(new String(next.value));
+                numberOfKeysReturned++;
+            }
         }
-        assertThat(numberOfKeysReturned, is(2));
-        assertThat(keys, is(Arrays.asList("p1", "p11")));
-        assertThat(values, is(Arrays.asList("2", "2")));
+
+        assertEquals(2, numberOfKeysReturned);
+        assertEquals(Arrays.asList("p1", "p11"), keys);
+        assertEquals(Arrays.asList("2", "2"), values);
+
     }
 
     @Test
@@ -399,20 +437,22 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
 
         store.putAll(entries);
 
-        final KeyValueIterator<Bytes, byte[]> keysWithPrefix = store.prefixScan("abcd", new StringSerializer());
         final List<String> keys = new ArrayList<>();
         final List<String> values = new ArrayList<>();
         int numberOfKeysReturned = 0;
 
-        while (keysWithPrefix.hasNext()) {
-            final KeyValue<Bytes, byte[]> next = keysWithPrefix.next();
-            keys.add(next.key.toString());
-            values.add(new String(next.value));
-            numberOfKeysReturned++;
+        try (final KeyValueIterator<Bytes, byte[]> keysWithPrefix = store.prefixScan("abcd", new StringSerializer())) {
+            while (keysWithPrefix.hasNext()) {
+                final KeyValue<Bytes, byte[]> next = keysWithPrefix.next();
+                keys.add(next.key.toString());
+                values.add(new String(next.value));
+                numberOfKeysReturned++;
+            }
         }
-        assertThat(numberOfKeysReturned, is(2));
-        assertThat(keys, is(Arrays.asList("abcd", "abcdd")));
-        assertThat(values, is(Arrays.asList("2", "1")));
+
+        assertEquals(2, numberOfKeysReturned);
+        assertEquals(Arrays.asList("abcd", "abcdd"), keys);
+        assertEquals(Arrays.asList("2", "1"), values);
     }
 
     @Test
@@ -420,10 +460,18 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
         store.put(bytesKey("a"), bytesValue("a"));
         store.delete(bytesKey("a"));
         assertNull(store.get(bytesKey("a")));
-        assertFalse(store.range(bytesKey("a"), bytesKey("b")).hasNext());
-        assertFalse(store.reverseRange(bytesKey("a"), bytesKey("b")).hasNext());
-        assertFalse(store.all().hasNext());
-        assertFalse(store.reverseAll().hasNext());
+        try (final KeyValueIterator<Bytes, byte[]> iterator = store.range(bytesKey("a"), bytesKey("b"))) {
+            assertFalse(iterator.hasNext());
+        }
+        try (final KeyValueIterator<Bytes, byte[]> iterator = store.reverseRange(bytesKey("a"), bytesKey("b"))) {
+            assertFalse(iterator.hasNext());
+        }
+        try (final KeyValueIterator<Bytes, byte[]> iterator = store.all()) {
+            assertFalse(iterator.hasNext());
+        }
+        try (final KeyValueIterator<Bytes, byte[]> iterator = store.reverseAll()) {
+            assertFalse(iterator.hasNext());
+        }
     }
 
     @Test
@@ -432,10 +480,18 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
         store.flush();
         store.delete(bytesKey("a"));
         assertNull(store.get(bytesKey("a")));
-        assertFalse(store.range(bytesKey("a"), bytesKey("b")).hasNext());
-        assertFalse(store.reverseRange(bytesKey("a"), bytesKey("b")).hasNext());
-        assertFalse(store.all().hasNext());
-        assertFalse(store.reverseAll().hasNext());
+        try (final KeyValueIterator<Bytes, byte[]> iterator = store.range(bytesKey("a"), bytesKey("b"))) {
+            assertFalse(iterator.hasNext());
+        }
+        try (final KeyValueIterator<Bytes, byte[]> iterator = store.reverseRange(bytesKey("a"), bytesKey("b"))) {
+            assertFalse(iterator.hasNext());
+        }
+        try (final KeyValueIterator<Bytes, byte[]> iterator = store.all()) {
+            assertFalse(iterator.hasNext());
+        }
+        try (final KeyValueIterator<Bytes, byte[]> iterator = store.reverseAll()) {
+            assertFalse(iterator.hasNext());
+        }
     }
 
     @Test
@@ -462,6 +518,7 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
         });
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void shouldThrowIfTryingToDoRangeQueryOnClosedCachingStore() {
         assertThrows(InvalidStateStoreException.class, () -> {
@@ -470,6 +527,7 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
         });
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void shouldThrowIfTryingToDoReverseRangeQueryOnClosedCachingStore() {
         assertThrows(InvalidStateStoreException.class, () -> {
@@ -478,6 +536,7 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
         });
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void shouldThrowIfTryingToDoAllQueryOnClosedCachingStore() {
         assertThrows(InvalidStateStoreException.class, () -> {
@@ -486,6 +545,7 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
         });
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void shouldThrowIfTryingToDoReverseAllQueryOnClosedCachingStore() {
         assertThrows(InvalidStateStoreException.class, () -> {
@@ -569,7 +629,7 @@ public class CachingInMemoryKeyValueStoreTest extends AbstractKeyValueStoreTest 
     }
 
     private int addItemsToCache() {
-        int cachedSize = 0;
+        long cachedSize = 0;
         int i = 0;
         while (cachedSize < maxCacheSizeBytes) {
             final String kv = String.valueOf(i++);

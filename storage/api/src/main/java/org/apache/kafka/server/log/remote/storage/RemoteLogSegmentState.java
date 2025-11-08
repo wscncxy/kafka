@@ -16,8 +16,6 @@
  */
 package org.apache.kafka.server.log.remote.storage;
 
-import org.apache.kafka.common.annotation.InterfaceStability;
-
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
@@ -34,7 +32,7 @@ import java.util.stream.Collectors;
  * <p>
  * <pre>
  * +---------------------+            +----------------------+
- * |COPY_SEGMENT_STARTED |----------> |COPY_SEGMENT_FINISHED |
+ * |COPY_SEGMENT_STARTED |----------&gt; |COPY_SEGMENT_FINISHED |
  * +-------------------+-+            +--+-------------------+
  *                     |                 |
  *                     |                 |
@@ -50,7 +48,6 @@ import java.util.stream.Collectors;
  *                  +-----------------------+
  * </pre>
  */
-@InterfaceStability.Evolving
 public enum RemoteLogSegmentState {
 
     /**

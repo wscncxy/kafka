@@ -16,13 +16,15 @@
  */
 package org.apache.kafka.common.message;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.MessageUtil;
 import org.apache.kafka.common.protocol.ObjectSerializationCache;
 import org.apache.kafka.common.utils.ByteUtils;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
@@ -30,6 +32,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.function.Consumer;
 
+import static org.apache.kafka.common.protocol.MessageUtil.UNSIGNED_INT_MAX;
+import static org.apache.kafka.common.protocol.MessageUtil.UNSIGNED_SHORT_MAX;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -80,7 +84,7 @@ public class SimpleExampleMessageTest {
         out.setProcessId(uuid);
         out.setZeroCopyByteBuffer(buf);
 
-        final ByteBuffer buffer = MessageUtil.toByteBuffer(out, (short) 1);
+        final ByteBuffer buffer = MessageUtil.toByteBufferAccessor(out, (short) 1).buffer();
 
         final SimpleExampleMessageData in = new SimpleExampleMessageData();
         in.read(new ByteBufferAccessor(buffer), (short) 1);
@@ -102,7 +106,7 @@ public class SimpleExampleMessageTest {
         out.setZeroCopyByteBuffer(buf1);
         out.setNullableZeroCopyByteBuffer(buf2);
 
-        final ByteBuffer buffer = MessageUtil.toByteBuffer(out, (short) 1);
+        final ByteBuffer buffer = MessageUtil.toByteBufferAccessor(out, (short) 1).buffer();
 
         final SimpleExampleMessageData in = new SimpleExampleMessageData();
         in.read(new ByteBufferAccessor(buffer), (short) 1);
@@ -180,6 +184,18 @@ public class SimpleExampleMessageTest {
     }
 
     @Test
+    public void testMyUint32() {
+        // Verify that the uint16 field reads as 33000 when not set.
+        testRoundTrip(new SimpleExampleMessageData(),
+                message -> assertEquals(1234567, message.myUint32()));
+
+        testRoundTrip(new SimpleExampleMessageData().setMyUint32(123),
+                message -> assertEquals(123, message.myUint32()));
+        testRoundTrip(new SimpleExampleMessageData().setMyUint32(60000),
+                message -> assertEquals(60000, message.myUint32()));
+    }
+
+    @Test
     public void testMyUint16() {
         // Verify that the uint16 field reads as 33000 when not set.
         testRoundTrip(new SimpleExampleMessageData(),
@@ -206,7 +222,12 @@ public class SimpleExampleMessageTest {
         assertThrows(RuntimeException.class,
             () -> new SimpleExampleMessageData().setMyUint16(-1));
         assertThrows(RuntimeException.class,
-            () -> new SimpleExampleMessageData().setMyUint16(65536));
+            () -> new SimpleExampleMessageData().setMyUint16(UNSIGNED_SHORT_MAX + 1));
+
+        assertThrows(RuntimeException.class,
+                () -> new SimpleExampleMessageData().setMyUint32(-1));
+        assertThrows(RuntimeException.class,
+                () -> new SimpleExampleMessageData().setMyUint32(UNSIGNED_INT_MAX + 1));
 
         // Verify that the tagged field reads as empty when not set.
         testRoundTrip(new SimpleExampleMessageData(),
@@ -320,9 +341,8 @@ public class SimpleExampleMessageTest {
                                Consumer<SimpleExampleMessageData> validator,
                                short version) {
         validator.accept(message);
-        ByteBuffer buf = MessageUtil.toByteBuffer(message, version);
 
-        SimpleExampleMessageData message2 = deserialize(buf.duplicate(), version);
+        SimpleExampleMessageData message2 = roundTripSerde(message, version);
         validator.accept(message2);
         assertEquals(message, message2);
         assertEquals(message.hashCode(), message2.hashCode());
@@ -333,6 +353,32 @@ public class SimpleExampleMessageTest {
         validator.accept(messageFromJson);
         assertEquals(message, messageFromJson);
         assertEquals(message.hashCode(), messageFromJson.hashCode());
+    }
+
+    private SimpleExampleMessageData roundTripSerde(
+        SimpleExampleMessageData message,
+        short version
+    ) {
+        ByteBuffer buf = MessageUtil.toByteBufferAccessor(message, version).buffer();
+        // Check size calculation
+        assertEquals(buf.remaining(), message.size(new ObjectSerializationCache(), version));
+        return deserialize(buf.duplicate(), version);
+    }
+
+    @Test
+    public void testTaggedFieldsShouldSupportFlexibleVersionSubset() {
+        SimpleExampleMessageData message = new SimpleExampleMessageData()
+            .setTaggedLongFlexibleVersionSubset(15L);
+
+        testRoundTrip(
+            message,
+            msg -> assertEquals(15, msg.taggedLongFlexibleVersionSubset),
+            (short) 2
+        );
+
+        SimpleExampleMessageData deserialized = roundTripSerde(message, (short) 1);
+        assertEquals(new SimpleExampleMessageData(), deserialized);
+        assertEquals(0, deserialized.taggedLongFlexibleVersionSubset);
     }
 
     @Test
@@ -353,8 +399,10 @@ public class SimpleExampleMessageTest {
                 "nullableZeroCopyByteBuffer=java.nio.HeapByteBuffer[pos=0 lim=0 cap=0], " +
                 "myStruct=MyStruct(structId=0, arrayInStruct=[]), " +
                 "myTaggedStruct=TaggedStruct(structId=''), " +
+                "taggedLongFlexibleVersionSubset=0, " +
                 "myCommonStruct=TestCommonStruct(foo=123, bar=123), " +
                 "myOtherCommonStruct=TestCommonStruct(foo=123, bar=123), " +
-                "myUint16=65535)", message.toString());
+                "myUint16=65535, " +
+                "myUint32=1234567)", message.toString());
     }
 }

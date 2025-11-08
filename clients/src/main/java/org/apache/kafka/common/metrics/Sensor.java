@@ -16,7 +16,6 @@
  */
 package org.apache.kafka.common.metrics;
 
-import java.util.function.Supplier;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.metrics.CompoundStat.NamedMeasurable;
 import org.apache.kafka.common.metrics.stats.TokenBucket;
@@ -31,6 +30,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static java.util.Arrays.asList;
 import static java.util.Collections.unmodifiableList;
@@ -297,7 +297,10 @@ public final class Sensor {
         for (NamedMeasurable m : stat.stats()) {
             final KafkaMetric metric = new KafkaMetric(lock, m.name(), m.stat(), statConfig, time);
             if (!metrics.containsKey(metric.metricName())) {
-                registry.registerMetric(metric);
+                KafkaMetric existingMetric = registry.registerMetric(metric);
+                if (existingMetric != null) {
+                    throw new IllegalArgumentException("A metric named '" + metric.metricName() + "' already exists, can't register another one.");
+                }
                 metrics.put(metric.metricName(), metric);
             }
         }
@@ -336,7 +339,10 @@ public final class Sensor {
                 statConfig,
                 time
             );
-            registry.registerMetric(metric);
+            KafkaMetric existingMetric = registry.registerMetric(metric);
+            if (existingMetric != null) {
+                throw new IllegalArgumentException("A metric named '" + metricName + "' already exists, can't register another one.");
+            }
             metrics.put(metric.metricName(), metric);
             stats.add(new StatAndConfig(Objects.requireNonNull(stat), metric::config));
             return true;
@@ -361,7 +367,7 @@ public final class Sensor {
     }
 
     synchronized List<KafkaMetric> metrics() {
-        return unmodifiableList(new ArrayList<>(this.metrics.values()));
+        return List.copyOf(this.metrics.values());
     }
 
     /**

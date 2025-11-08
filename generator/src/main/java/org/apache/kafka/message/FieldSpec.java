@@ -107,6 +107,13 @@ public final class FieldSpec {
             if (!this.type.isArray() && !this.type.isStruct()) {
                 throw new RuntimeException("Non-array or Struct field " + name + " cannot have fields");
             }
+            // Check struct invariants
+            if (this.type.isStruct() || this.type.isStructArray()) {
+                new StructSpec(name,
+                    versions,
+                    Versions.NONE_STRING, // version deprecations not supported at field level
+                    fields);
+            }
         }
 
         if (flexibleVersions == null || flexibleVersions.isEmpty()) {
@@ -300,6 +307,7 @@ public final class FieldSpec {
         } else if ((type instanceof FieldType.Int8FieldType) ||
             (type instanceof FieldType.Int16FieldType) ||
             (type instanceof FieldType.Uint16FieldType) ||
+            (type instanceof FieldType.Uint32FieldType) ||
             (type instanceof FieldType.Int32FieldType) ||
             (type instanceof FieldType.Int64FieldType)) {
             int base = 10;
@@ -338,13 +346,29 @@ public final class FieldSpec {
                 } else {
                     try {
                         int value = Integer.valueOf(defaultString, base);
-                        if (value < 0 || value > 65535) {
+                        if (value < 0 || value > MessageGenerator.UNSIGNED_SHORT_MAX) {
                             throw new RuntimeException("Invalid default for uint16 field " +
                                     name + ": out of range.");
                         }
                     } catch (NumberFormatException e) {
                         throw new RuntimeException("Invalid default for uint16 field " +
                             name + ": " + defaultString, e);
+                    }
+                    return fieldDefault;
+                }
+            } else if (type instanceof FieldType.Uint32FieldType) {
+                if (defaultString.isEmpty()) {
+                    return "0";
+                } else {
+                    try {
+                        long value = Long.valueOf(defaultString, base);
+                        if (value < 0 || value > MessageGenerator.UNSIGNED_INT_MAX) {
+                            throw new RuntimeException("Invalid default for uint32 field " +
+                                    name + ": out of range.");
+                        }
+                    } catch (NumberFormatException e) {
+                        throw new RuntimeException("Invalid default for uint32 field " +
+                                name + ": " + defaultString, e);
                     }
                     return fieldDefault;
                 }
@@ -429,11 +453,15 @@ public final class FieldSpec {
         } else if (type.isRecords()) {
             return "null";
         } else if (type.isStruct()) {
-            if (!fieldDefault.isEmpty()) {
+            if (fieldDefault.equals("null")) {
+                validateNullDefault();
+                return "null";
+            } else if (!fieldDefault.isEmpty()) {
                 throw new RuntimeException("Invalid default for struct field " +
-                    name + ": custom defaults are not supported for struct fields.");
+                    name + ".  The only valid default for a struct field " +
+                    "is the empty struct or null.");
             }
-            return "new " + type.toString() + "()";
+            return "new " + type + "()";
         } else if (type.isArray()) {
             if (fieldDefault.equals("null")) {
                 validateNullDefault();
@@ -476,6 +504,8 @@ public final class FieldSpec {
             return "short";
         } else if (type instanceof FieldType.Uint16FieldType) {
             return "int";
+        } else if (type instanceof FieldType.Uint32FieldType) {
+            return "long";
         } else if (type instanceof FieldType.Int32FieldType) {
             return "int";
         } else if (type instanceof FieldType.Int64FieldType) {

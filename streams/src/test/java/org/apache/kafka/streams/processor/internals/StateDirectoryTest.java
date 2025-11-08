@@ -16,99 +16,120 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.BufferedWriter;
-import java.io.FileOutputStream;
-import java.io.OutputStreamWriter;
-import java.nio.charset.StandardCharsets;
-import java.util.UUID;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.utils.LogCaptureAppender;
+import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.TopologyConfig;
 import org.apache.kafka.streams.errors.ProcessorStateException;
+import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.TaskId;
-import org.apache.kafka.streams.processor.internals.testutil.LogCaptureAppender;
+import org.apache.kafka.streams.processor.internals.StateDirectory.TaskDirectory;
+import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.apache.kafka.streams.state.internals.OffsetCheckpoint;
+import org.apache.kafka.test.MockKeyValueStore;
 import org.apache.kafka.test.TestUtils;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mockito;
+
+import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
-import java.nio.channels.FileChannel;
-import java.nio.channels.OverlappingFileLockException;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonList;
 import static org.apache.kafka.common.utils.Utils.mkEntry;
 import static org.apache.kafka.common.utils.Utils.mkMap;
-import static org.apache.kafka.common.utils.Utils.mkSet;
-import static org.apache.kafka.streams.processor.internals.StateDirectory.LOCK_FILE_NAME;
 import static org.apache.kafka.streams.processor.internals.StateDirectory.PROCESS_FILE_NAME;
 import static org.apache.kafka.streams.processor.internals.StateManagerUtil.CHECKPOINT_FILE_NAME;
+import static org.apache.kafka.streams.processor.internals.StateManagerUtil.toTaskDirString;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.endsWith;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.hasItem;
+import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class StateDirectoryTest {
 
     private final MockTime time = new MockTime();
     private File stateDir;
     private final String applicationId = "applicationId";
+    private StreamsConfig config;
     private StateDirectory directory;
     private File appDir;
 
-    private void initializeStateDirectory(final boolean createStateDirectory) throws IOException {
+    private void initializeStateDirectory(final boolean createStateDirectory, final boolean hasNamedTopology) throws IOException {
+        initializeStateDirectory(createStateDirectory, hasNamedTopology, false);
+    }
+
+    private void initializeStateDirectory(
+            final boolean createStateDirectory,
+            final boolean hasNamedTopology,
+            final boolean allowOsGroupWriteAccess
+    ) throws IOException {
         stateDir = new File(TestUtils.IO_TMP_DIR, "kafka-" + TestUtils.randomString(5));
         if (!createStateDirectory) {
             cleanup();
         }
-        directory = new StateDirectory(
-            new StreamsConfig(new Properties() {
-                {
-                    put(StreamsConfig.APPLICATION_ID_CONFIG, applicationId);
-                    put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "dummy:1234");
-                    put(StreamsConfig.STATE_DIR_CONFIG, stateDir.getPath());
-                }
-            }),
-            time, createStateDirectory);
+        config = new StreamsConfig(Map.of(
+                StreamsConfig.APPLICATION_ID_CONFIG, applicationId,
+                StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "dummy:1234",
+                StreamsConfig.STATE_DIR_CONFIG, stateDir.getPath(),
+                StreamsConfig.ALLOW_OS_GROUP_WRITE_ACCESS_CONFIG, allowOsGroupWriteAccess
+        ));
+        directory = new StateDirectory(config, time, createStateDirectory, hasNamedTopology);
         appDir = new File(stateDir, applicationId);
     }
 
-    @Before
+    @BeforeEach
     public void before() throws IOException {
-        initializeStateDirectory(true);
+        initializeStateDirectory(true, false);
     }
 
-    @After
+    @AfterEach
     public void cleanup() throws IOException {
         Utils.delete(stateDir);
     }
@@ -123,11 +144,33 @@ public class StateDirectoryTest {
 
     @Test
     public void shouldHaveSecurePermissions() {
-        assertPermissions(stateDir);
-        assertPermissions(appDir);
+        assertPermissions(stateDir, false);
+        assertPermissions(appDir, false);
     }
-    
-    private void assertPermissions(final File file) {
+
+    @Test
+    public void shouldHaveSecurePermissionsIfGroupWriteAccessAllowed() throws IOException {
+        cleanup();
+        initializeStateDirectory(true, false, true);
+        assertPermissions(stateDir, true);
+        assertPermissions(appDir, true);
+    }
+
+    @Test
+    public void shouldUpdateSecurePermissions() throws IOException {
+        assertPermissions(stateDir, false);
+        assertPermissions(appDir, false);
+
+        initializeStateDirectory(true, false, true);
+        assertPermissions(stateDir, true);
+        assertPermissions(appDir, true);
+
+        initializeStateDirectory(true, false, false);
+        assertPermissions(stateDir, false);
+        assertPermissions(appDir, false);
+    }
+
+    private void assertPermissions(final File file, final boolean allowOsGroupWriteAccess) {
         final Path path = file.toPath();
         if (path.getFileSystem().supportedFileAttributeViews().contains("posix")) {
             final Set<PosixFilePermission> expectedPermissions = EnumSet.of(
@@ -136,9 +179,12 @@ public class StateDirectoryTest {
                     PosixFilePermission.OWNER_WRITE,
                     PosixFilePermission.GROUP_EXECUTE,
                     PosixFilePermission.OWNER_READ);
+            if (allowOsGroupWriteAccess) {
+                expectedPermissions.add(PosixFilePermission.GROUP_WRITE);
+            }
             try {
                 final Set<PosixFilePermission> filePermissions = Files.getPosixFilePermissions(path);
-                assertThat(expectedPermissions, equalTo(filePermissions));
+                assertThat(filePermissions, equalTo(expectedPermissions));
             } catch (final IOException e) {
                 fail("Should create correct files and set correct permissions");
             }
@@ -147,6 +193,18 @@ public class StateDirectoryTest {
             assertThat(file.canWrite(), is(true));
             assertThat(file.canExecute(), is(true));
         }
+    }
+
+    @Test
+    public void shouldParseUnnamedTaskId() {
+        final TaskId task = new TaskId(1, 0);
+        assertThat(TaskId.parse(task.toString()), equalTo(task));
+    }
+
+    @Test
+    public void shouldParseNamedTaskId() {
+        final TaskId task = new TaskId(1, 0, "namedTopology");
+        assertThat(TaskId.parse(task.toString()), equalTo(task));
     }
 
     @Test
@@ -219,6 +277,30 @@ public class StateDirectoryTest {
     }
 
     @Test
+    public void shouldThrowProcessorStateExceptionIfStateDirOccupied() throws IOException {
+        final TaskId taskId = new TaskId(0, 0);
+
+        // Replace application's stateDir to regular file
+        Utils.delete(appDir);
+        Files.createFile(appDir.toPath());
+
+        assertThrows(ProcessorStateException.class, () -> directory.getOrCreateDirectoryForTask(taskId));
+    }
+
+    @Test
+    public void shouldThrowProcessorStateExceptionIfTestDirOccupied() throws IOException {
+        final TaskId taskId = new TaskId(0, 0);
+
+        // Replace taskDir to a regular file
+        final File taskDir = new File(appDir, toTaskDirString(taskId));
+        Utils.delete(taskDir);
+        Files.createFile(taskDir.toPath());
+
+        // Error: ProcessorStateException should be thrown.
+        assertThrows(ProcessorStateException.class, () -> directory.getOrCreateDirectoryForTask(taskId));
+    }
+
+    @Test
     public void shouldNotThrowIfStateDirectoryHasBeenDeleted() throws IOException {
         final TaskId taskId = new TaskId(0, 0);
 
@@ -238,24 +320,6 @@ public class StateDirectoryTest {
     }
 
     @Test
-    public void shouldReleaseTaskStateDirectoryLock() throws IOException {
-        final TaskId taskId = new TaskId(0, 0);
-        final File taskDirectory = directory.getOrCreateDirectoryForTask(taskId);
-
-        directory.lock(taskId);
-        directory.unlock(taskId);
-
-        try (
-            final FileChannel channel = FileChannel.open(
-                new File(taskDirectory, LOCK_FILE_NAME).toPath(),
-                StandardOpenOption.CREATE,
-                StandardOpenOption.WRITE)
-        ) {
-            channel.tryLock();
-        }
-    }
-
-    @Test
     public void shouldCleanUpTaskStateDirectoriesThatAreNotCurrentlyLocked() {
         final TaskId task0 = new TaskId(0, 0);
         final TaskId task1 = new TaskId(1, 0);
@@ -268,28 +332,24 @@ public class StateDirectoryTest {
             directory.lock(task0);
             directory.lock(task1);
 
-            final File dir0 = new File(appDir, task0.toString());
-            final File dir1 = new File(appDir, task1.toString());
-            final File dir2 = new File(appDir, task2.toString());
+            final TaskDirectory dir0 = new TaskDirectory(new File(appDir, toTaskDirString(task0)), null);
+            final TaskDirectory dir1 = new TaskDirectory(new File(appDir, toTaskDirString(task1)), null);
+            final TaskDirectory dir2 = new TaskDirectory(new File(appDir, toTaskDirString(task2)), null);
 
-            Set<File> files = Arrays.stream(
-                Objects.requireNonNull(directory.listAllTaskDirectories())).collect(Collectors.toSet());
-            assertEquals(mkSet(dir0, dir1, dir2), files);
+            List<TaskDirectory> files = directory.listAllTaskDirectories();
+            assertEquals(Set.of(dir0, dir1, dir2), new HashSet<>(files));
 
-            files = Arrays.stream(
-                Objects.requireNonNull(directory.listNonEmptyTaskDirectories())).collect(Collectors.toSet());
-            assertEquals(mkSet(dir0, dir1, dir2), files);
+            files = directory.listNonEmptyTaskDirectories();
+            assertEquals(Set.of(dir0, dir1, dir2), new HashSet<>(files));
 
             time.sleep(5000);
             directory.cleanRemovedTasks(0);
 
-            files = Arrays.stream(
-                Objects.requireNonNull(directory.listAllTaskDirectories())).collect(Collectors.toSet());
-            assertEquals(mkSet(dir0, dir1, dir2), files);
+            files = directory.listAllTaskDirectories();
+            assertEquals(Set.of(dir0, dir1), new HashSet<>(files));
 
-            files = Arrays.stream(
-                Objects.requireNonNull(directory.listNonEmptyTaskDirectories())).collect(Collectors.toSet());
-            assertEquals(mkSet(dir0, dir1), files);
+            files = directory.listNonEmptyTaskDirectories();
+            assertEquals(Set.of(dir0, dir1), new HashSet<>(files));
         } finally {
             directory.unlock(task0);
             directory.unlock(task1);
@@ -304,44 +364,32 @@ public class StateDirectoryTest {
         final int cleanupDelayMs = 60000;
         directory.cleanRemovedTasks(cleanupDelayMs);
         assertTrue(dir.exists());
-        assertEquals(1, directory.listAllTaskDirectories().length);
-        assertEquals(1, directory.listNonEmptyTaskDirectories().length);
+        assertEquals(1, directory.listAllTaskDirectories().size());
+        assertEquals(1, directory.listNonEmptyTaskDirectories().size());
 
         time.sleep(cleanupDelayMs + 1000);
         directory.cleanRemovedTasks(cleanupDelayMs);
-        assertTrue(dir.exists());
-        assertEquals(1, directory.listAllTaskDirectories().length);
-        assertEquals(0, directory.listNonEmptyTaskDirectories().length);
+        assertFalse(dir.exists());
+        assertEquals(0, directory.listAllTaskDirectories().size());
+        assertEquals(0, directory.listNonEmptyTaskDirectories().size());
     }
 
     @Test
-    public void shouldCleanupObsoleteStateDirectoriesOnlyOnce() {
+    public void shouldCleanupObsoleteTaskDirectoriesAndDeleteTheDirectoryItself() {
         final File dir = directory.getOrCreateDirectoryForTask(new TaskId(2, 0));
         assertTrue(new File(dir, "store").mkdir());
-        assertEquals(1, directory.listAllTaskDirectories().length);
-        assertEquals(1, directory.listNonEmptyTaskDirectories().length);
+        assertEquals(1, directory.listAllTaskDirectories().size());
+        assertEquals(1, directory.listNonEmptyTaskDirectories().size());
 
         try (final LogCaptureAppender appender = LogCaptureAppender.createAndRegister(StateDirectory.class)) {
             time.sleep(5000);
             directory.cleanRemovedTasks(0);
-            assertTrue(dir.exists());
-            assertEquals(1, directory.listAllTaskDirectories().length);
-            assertEquals(0, directory.listNonEmptyTaskDirectories().length);
+            assertFalse(dir.exists());
+            assertEquals(0, directory.listAllTaskDirectories().size());
+            assertEquals(0, directory.listNonEmptyTaskDirectories().size());
             assertThat(
                 appender.getMessages(),
                 hasItem(containsString("Deleting obsolete state directory"))
-            );
-        }
-
-        try (final LogCaptureAppender appender = LogCaptureAppender.createAndRegister(StateDirectory.class)) {
-            time.sleep(5000);
-            directory.cleanRemovedTasks(0);
-            assertTrue(dir.exists());
-            assertEquals(1, directory.listAllTaskDirectories().length);
-            assertEquals(0, directory.listNonEmptyTaskDirectories().length);
-            assertThat(
-                appender.getMessages(),
-                not(hasItem(containsString("Deleting obsolete state directory")))
             );
         }
     }
@@ -355,15 +403,15 @@ public class StateDirectoryTest {
 
     @Test
     public void shouldReturnEmptyArrayForNonPersistentApp() throws IOException {
-        initializeStateDirectory(false);
-        assertTrue(Arrays.asList(directory.listAllTaskDirectories()).isEmpty());
+        initializeStateDirectory(false, false);
+        assertTrue(directory.listAllTaskDirectories().isEmpty());
     }
 
     @Test
     public void shouldReturnEmptyArrayIfStateDirDoesntExist() throws IOException {
         cleanup();
         assertFalse(stateDir.exists());
-        assertTrue(Arrays.asList(directory.listAllTaskDirectories()).isEmpty());
+        assertTrue(directory.listAllTaskDirectories().isEmpty());
     }
 
     @Test
@@ -377,37 +425,35 @@ public class StateDirectoryTest {
                     put(StreamsConfig.STATE_DIR_CONFIG, stateDir.getPath());
                 }
             }),
-            time, true);
+            time,
+            true,
+            false);
         appDir = new File(stateDir, applicationId);
 
         // make sure the File#listFiles returns null and StateDirectory#listAllTaskDirectories is able to handle null
         Utils.delete(appDir);
-        assertTrue(appDir.createNewFile());
-        assertTrue(appDir.exists());
+        Files.createFile(appDir.toPath());
+        assertTrue(Files.exists(appDir.toPath()));
         assertNull(appDir.listFiles());
-        assertEquals(0, directory.listAllTaskDirectories().length);
+        assertEquals(0, directory.listAllTaskDirectories().size());
     }
 
     @Test
     public void shouldOnlyListNonEmptyTaskDirectories() throws IOException {
         TestUtils.tempDirectory(stateDir.toPath(), "foo");
-        final File taskDir1 = directory.getOrCreateDirectoryForTask(new TaskId(0, 0));
-        final File taskDir2 = directory.getOrCreateDirectoryForTask(new TaskId(0, 1));
+        final TaskDirectory taskDir1 = new TaskDirectory(directory.getOrCreateDirectoryForTask(new TaskId(0, 0)), null);
+        final TaskDirectory taskDir2 = new TaskDirectory(directory.getOrCreateDirectoryForTask(new TaskId(0, 1)), null);
 
-        final File storeDir = new File(taskDir1, "store");
+        final File storeDir = new File(taskDir1.file(), "store");
         assertTrue(storeDir.mkdir());
 
-        assertEquals(mkSet(taskDir1, taskDir2), Arrays.stream(
-            directory.listAllTaskDirectories()).collect(Collectors.toSet()));
-        assertEquals(mkSet(taskDir1), Arrays.stream(
-            directory.listNonEmptyTaskDirectories()).collect(Collectors.toSet()));
+        assertThat(Set.of(taskDir1, taskDir2), equalTo(new HashSet<>(directory.listAllTaskDirectories())));
+        assertThat(singletonList(taskDir1), equalTo(directory.listNonEmptyTaskDirectories()));
 
-        Utils.delete(taskDir1, Collections.singletonList(new File(taskDir1, LOCK_FILE_NAME)));
+        Utils.delete(taskDir1.file());
 
-        assertEquals(mkSet(taskDir1, taskDir2), Arrays.stream(
-            directory.listAllTaskDirectories()).collect(Collectors.toSet()));
-        assertEquals(Collections.emptySet(), Arrays.stream(
-            directory.listNonEmptyTaskDirectories()).collect(Collectors.toSet()));
+        assertThat(singleton(taskDir2), equalTo(new HashSet<>(directory.listAllTaskDirectories())));
+        assertThat(emptyList(), equalTo(directory.listNonEmptyTaskDirectories()));
     }
 
     @Test
@@ -422,41 +468,12 @@ public class StateDirectoryTest {
                     put(StreamsConfig.STATE_DIR_CONFIG, stateDir.getPath());
                 }
             }),
-            time, true);
+            time,
+            true,
+            false);
         final File taskDir = stateDirectory.getOrCreateDirectoryForTask(new TaskId(0, 0));
         assertTrue(stateDir.exists());
         assertTrue(taskDir.exists());
-    }
-
-    @Test
-    public void shouldLockGlobalStateDirectory() throws IOException {
-        try (
-            final FileChannel channel = FileChannel.open(
-                new File(directory.globalStateDir(), LOCK_FILE_NAME).toPath(),
-                StandardOpenOption.CREATE,
-                StandardOpenOption.WRITE)
-        ) {
-            directory.lockGlobalState();
-            assertThrows(OverlappingFileLockException.class, channel::lock);
-        } finally {
-            directory.unlockGlobalState();
-        }
-    }
-
-    @Test
-    public void shouldUnlockGlobalStateDirectory() throws IOException {
-        directory.lockGlobalState();
-        directory.unlockGlobalState();
-
-        try (
-            final FileChannel channel = FileChannel.open(
-                new File(directory.globalStateDir(), LOCK_FILE_NAME).toPath(),
-                StandardOpenOption.CREATE,
-                StandardOpenOption.WRITE)
-        ) {
-            // should lock without any exceptions
-            channel.lock();
-        }
     }
 
     @Test
@@ -487,14 +504,14 @@ public class StateDirectoryTest {
         thread.start();
         lockLatch.await(5, TimeUnit.SECONDS);
 
-        assertNull("should not have had an exception on other thread", exceptionOnThread.get());
+        assertNull(exceptionOnThread.get(), "should not have had an exception on other thread");
         directory.unlock(taskId);
         assertFalse(directory.lock(taskId));
 
         unlockLatch.countDown();
         thread.join(30000);
 
-        assertNull("should not have had an exception on other thread", exceptionOnThread.get());
+        assertNull(exceptionOnThread.get(), "should not have had an exception on other thread");
         assertTrue(directory.lock(taskId));
     }
 
@@ -506,19 +523,19 @@ public class StateDirectoryTest {
 
         final File dir0 = new File(appDir, id.toString());
         final File globalDir = new File(appDir, "global");
-        assertEquals(mkSet(dir0, globalDir), Arrays.stream(
+        assertEquals(Set.of(dir0, globalDir), Arrays.stream(
             Objects.requireNonNull(appDir.listFiles())).collect(Collectors.toSet()));
 
         directory.clean();
 
-        assertEquals(Collections.emptySet(), Arrays.stream(
-            Objects.requireNonNull(appDir.listFiles())).collect(Collectors.toSet()));
+        // if appDir is empty, it is deleted in StateDirectory#clean process.
+        assertFalse(appDir.exists());
     }
 
     @Test
     public void shouldNotCreateBaseDirectory() throws IOException {
         try (final LogCaptureAppender appender = LogCaptureAppender.createAndRegister(StateDirectory.class)) {
-            initializeStateDirectory(false);
+            initializeStateDirectory(false, false);
             assertThat(stateDir.exists(), is(false));
             assertThat(appDir.exists(), is(false));
             assertThat(appender.getMessages(),
@@ -528,7 +545,7 @@ public class StateDirectoryTest {
 
     @Test
     public void shouldNotCreateTaskStateDirectory() throws IOException {
-        initializeStateDirectory(false);
+        initializeStateDirectory(false, false);
         final TaskId taskId = new TaskId(0, 0);
         final File taskDirectory = directory.getOrCreateDirectoryForTask(taskId);
         assertFalse(taskDirectory.exists());
@@ -536,22 +553,16 @@ public class StateDirectoryTest {
 
     @Test
     public void shouldNotCreateGlobalStateDirectory() throws IOException {
-        initializeStateDirectory(false);
+        initializeStateDirectory(false, false);
         final File globalStateDir = directory.globalStateDir();
         assertFalse(globalStateDir.exists());
     }
 
     @Test
     public void shouldLockTaskStateDirectoryWhenDirectoryCreationDisabled() throws IOException {
-        initializeStateDirectory(false);
+        initializeStateDirectory(false, false);
         final TaskId taskId = new TaskId(0, 0);
         assertTrue(directory.lock(taskId));
-    }
-
-    @Test
-    public void shouldLockGlobalStateDirectoryWhenDirectoryCreationDisabled() throws IOException {
-        initializeStateDirectory(false);
-        assertTrue(directory.lockGlobalState());
     }
 
     @Test
@@ -574,6 +585,43 @@ public class StateDirectoryTest {
         assertTrue(passed.get());
         assertTrue(runner.taskDirectory.exists());
         assertTrue(runner.taskDirectory.isDirectory());
+    }
+
+    @Test
+    public void shouldDeleteAppDirWhenCleanUpIfEmpty() {
+        final TaskId taskId = new TaskId(0, 0);
+        final File taskDirectory = directory.getOrCreateDirectoryForTask(taskId);
+        final File testFile = new File(taskDirectory, "testFile");
+        assertThat(testFile.mkdir(), is(true));
+        assertThat(directory.directoryForTaskIsEmpty(taskId), is(false));
+
+        // call StateDirectory#clean
+        directory.clean();
+
+        // if appDir is empty, it is deleted in StateDirectory#clean process.
+        assertFalse(appDir.exists());
+    }
+
+    @Test
+    public void shouldNotDeleteAppDirWhenCleanUpIfNotEmpty() throws IOException {
+        final TaskId taskId = new TaskId(0, 0);
+        final File taskDirectory = directory.getOrCreateDirectoryForTask(taskId);
+        final File testFile = new File(taskDirectory, "testFile");
+        assertThat(testFile.mkdir(), is(true));
+        assertThat(directory.directoryForTaskIsEmpty(taskId), is(false));
+
+        // Create a dummy file in appDir; for this, appDir will not be empty after cleanup.
+        final File dummyFile = new File(appDir, "dummy");
+        Files.createFile(dummyFile.toPath());
+
+        try (final LogCaptureAppender appender = LogCaptureAppender.createAndRegister(StateDirectory.class)) {
+            // call StateDirectory#clean
+            directory.clean();
+            assertThat(
+                appender.getMessages(),
+                hasItem(endsWith(String.format("Failed to delete state store directory of %s for it is not empty", appDir.getAbsolutePath())))
+            );
+        }
     }
 
     @Test
@@ -615,18 +663,147 @@ public class StateDirectoryTest {
             new StateDirectory(
                 new StreamsConfig(
                     mkMap(
-                        mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, ""),
+                        mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "mock-localhost:9092"),
                         mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, "")
                     )
                 ),
                 new MockTime(),
-                true
+                true,
+                false
             );
             assertThat(
                 appender.getMessages(),
                 hasItem("Using an OS temp directory in the state.dir property can cause failures with writing the" +
                             " checkpoint file due to the fact that this directory can be cleared by the OS." +
                             " Resolved state.dir: [" + System.getProperty("java.io.tmpdir") + "/kafka-streams]")
+            );
+        }
+    }
+
+    /* Named Topology Tests */
+
+    @Test
+    public void shouldCreateTaskDirectoriesUnderNamedTopologyDirs() throws IOException {
+        initializeStateDirectory(true, true);
+
+        directory.getOrCreateDirectoryForTask(new TaskId(0, 0, "topology1"));
+        directory.getOrCreateDirectoryForTask(new TaskId(0, 1, "topology1"));
+        directory.getOrCreateDirectoryForTask(new TaskId(0, 0, "topology2"));
+
+        assertThat(new File(appDir, "__topology1__").exists(), is(true));
+        assertThat(new File(appDir, "__topology1__").isDirectory(), is(true));
+        assertThat(new File(appDir, "__topology2__").exists(), is(true));
+        assertThat(new File(appDir, "__topology2__").isDirectory(), is(true));
+
+        assertThat(new File(new File(appDir, "__topology1__"), "0_0").exists(), is(true));
+        assertThat(new File(new File(appDir, "__topology1__"), "0_0").isDirectory(), is(true));
+        assertThat(new File(new File(appDir, "__topology1__"), "0_1").exists(), is(true));
+        assertThat(new File(new File(appDir, "__topology1__"), "0_1").isDirectory(), is(true));
+        assertThat(new File(new File(appDir, "__topology2__"), "0_0").exists(), is(true));
+        assertThat(new File(new File(appDir, "__topology2__"), "0_0").isDirectory(), is(true));
+    }
+
+    @Test
+    public void shouldOnlyListNonEmptyTaskDirectoriesInNamedTopologies() throws IOException {
+        initializeStateDirectory(true, true);
+
+        TestUtils.tempDirectory(appDir.toPath(), "foo");
+        final TaskDirectory taskDir1 = new TaskDirectory(directory.getOrCreateDirectoryForTask(new TaskId(0, 0, "topology1")), "topology1");
+        final TaskDirectory taskDir2 = new TaskDirectory(directory.getOrCreateDirectoryForTask(new TaskId(0, 1, "topology1")), "topology1");
+        final TaskDirectory taskDir3 = new TaskDirectory(directory.getOrCreateDirectoryForTask(new TaskId(0, 0, "topology2")), "topology2");
+
+        final File storeDir = new File(taskDir1.file(), "store");
+        assertTrue(storeDir.mkdir());
+
+        assertThat(new HashSet<>(directory.listAllTaskDirectories()), equalTo(Set.of(taskDir1, taskDir2, taskDir3)));
+        assertThat(directory.listNonEmptyTaskDirectories(), equalTo(singletonList(taskDir1)));
+
+        Utils.delete(taskDir1.file());
+
+        assertThat(new HashSet<>(directory.listAllTaskDirectories()), equalTo(Set.of(taskDir2, taskDir3)));
+        assertThat(directory.listNonEmptyTaskDirectories(), equalTo(emptyList()));
+    }
+
+    @Test
+    public void shouldRemoveNonEmptyNamedTopologyDirsWhenCallingClean() throws Exception {
+        initializeStateDirectory(true, true);
+        final File taskDir = directory.getOrCreateDirectoryForTask(new TaskId(2, 0, "topology1"));
+        final File namedTopologyDir = new File(appDir, "__topology1__");
+
+        assertThat(taskDir.exists(), is(true));
+        assertThat(namedTopologyDir.exists(), is(true));
+        directory.clean();
+        assertThat(taskDir.exists(), is(false));
+        assertThat(namedTopologyDir.exists(), is(false));
+    }
+
+    @Test
+    public void shouldRemoveEmptyNamedTopologyDirsWhenCallingClean() throws IOException {
+        initializeStateDirectory(true, true);
+        final File namedTopologyDir = new File(appDir, "__topology1__");
+        assertThat(namedTopologyDir.mkdir(), is(true));
+        assertThat(namedTopologyDir.exists(), is(true));
+        directory.clean();
+        assertThat(namedTopologyDir.exists(), is(false));
+    }
+
+    @Test
+    public void shouldRemoveNonEmptyNamedTopologyDirsWhenCallingClearLocalStateForNamedTopology() throws Exception {
+        initializeStateDirectory(true, true);
+        final String topologyName = "topology1";
+        final File taskDir = directory.getOrCreateDirectoryForTask(new TaskId(2, 0, topologyName));
+        final File namedTopologyDir = new File(appDir, "__" + topologyName + "__");
+
+        assertThat(taskDir.exists(), is(true));
+        assertThat(namedTopologyDir.exists(), is(true));
+        directory.clearLocalStateForNamedTopology(topologyName);
+        assertThat(taskDir.exists(), is(false));
+        assertThat(namedTopologyDir.exists(), is(false));
+    }
+
+    @Test
+    public void shouldRemoveEmptyNamedTopologyDirsWhenCallingClearLocalStateForNamedTopology() throws IOException {
+        initializeStateDirectory(true, true);
+        final String topologyName = "topology1";
+        final File namedTopologyDir = new File(appDir, "__" + topologyName + "__");
+        assertThat(namedTopologyDir.mkdir(), is(true));
+        assertThat(namedTopologyDir.exists(), is(true));
+        directory.clearLocalStateForNamedTopology(topologyName);
+        assertThat(namedTopologyDir.exists(), is(false));
+    }
+
+    @Test
+    public void shouldNotRemoveDirsThatDoNotMatchNamedTopologyDirsWhenCallingClean() throws IOException {
+        initializeStateDirectory(true, true);
+        final File someDir = new File(appDir, "_not-a-valid-named-topology_dir_name_");
+        assertThat(someDir.mkdir(), is(true));
+        assertThat(someDir.exists(), is(true));
+        directory.clean();
+        assertThat(someDir.exists(), is(true));
+    }
+
+    @Test
+    public void shouldCleanupObsoleteTaskDirectoriesInNamedTopologiesAndDeleteTheParentDirectories() throws IOException {
+        initializeStateDirectory(true, true);
+
+        final File taskDir = directory.getOrCreateDirectoryForTask(new TaskId(2, 0, "topology1"));
+        final File namedTopologyDir = new File(appDir, "__topology1__");
+        assertThat(namedTopologyDir.exists(), is(true));
+        assertThat(taskDir.exists(), is(true));
+        assertTrue(new File(taskDir, "store").mkdir());
+        assertThat(directory.listAllTaskDirectories().size(), is(1));
+        assertThat(directory.listNonEmptyTaskDirectories().size(), is(1));
+
+        try (final LogCaptureAppender appender = LogCaptureAppender.createAndRegister(StateDirectory.class)) {
+            time.sleep(5000);
+            directory.cleanRemovedTasks(0);
+            assertThat(taskDir.exists(), is(false));
+            assertThat(namedTopologyDir.exists(), is(false));
+            assertThat(directory.listAllTaskDirectories().size(), is(0));
+            assertThat(directory.listNonEmptyTaskDirectories().size(), is(0));
+            assertThat(
+                appender.getMessages(),
+                hasItem(containsString("Deleting obsolete state directory"))
             );
         }
     }
@@ -653,7 +830,7 @@ public class StateDirectoryTest {
     @Test
     public void shouldGetFreshProcessIdIfJsonUnreadable() throws Exception {
         final File processFile = new File(appDir, PROCESS_FILE_NAME);
-        assertThat(processFile.createNewFile(), is(true));
+        Files.createFile(processFile.toPath());
         final UUID processId = UUID.randomUUID();
 
         final FileOutputStream fileOutputStream = new FileOutputStream(processFile);
@@ -677,6 +854,144 @@ public class StateDirectoryTest {
         assertThat(directory.initializeProcessId(), equalTo(processId));
     }
 
+    @Test
+    public void shouldNotInitializeStandbyTasksWhenNoLocalState() {
+        final TaskId taskId = new TaskId(0, 0);
+        initializeStartupTasks(new TaskId(0, 0), false);
+        assertFalse(directory.hasStartupTasks());
+        assertNull(directory.removeStartupTask(taskId));
+        assertFalse(directory.hasStartupTasks());
+    }
+
+    @Test
+    public void shouldInitializeStandbyTasksForLocalState() {
+        final TaskId taskId = new TaskId(0, 0);
+        initializeStartupTasks(new TaskId(0, 0), true);
+        assertTrue(directory.hasStartupTasks());
+        assertNotNull(directory.removeStartupTask(taskId));
+        assertFalse(directory.hasStartupTasks());
+        assertNull(directory.removeStartupTask(taskId));
+    }
+
+    @Test
+    public void shouldNotAssignStartupTasksWeDontHave() {
+        final TaskId taskId = new TaskId(0, 0);
+        initializeStartupTasks(taskId, false);
+        final Task task = directory.removeStartupTask(taskId);
+        assertNull(task);
+    }
+
+    private class FakeStreamThread extends Thread {
+        private final TaskId taskId;
+        private final AtomicReference<Task> result;
+
+        private FakeStreamThread(final TaskId taskId, final AtomicReference<Task> result) {
+            this.taskId = taskId;
+            this.result = result;
+        }
+
+        @Override
+        public void run() {
+            result.set(directory.removeStartupTask(taskId));
+        }
+    }
+
+    @Test
+    public void shouldAssignStartupTaskToStreamThread() throws InterruptedException {
+        final TaskId taskId = new TaskId(0, 0);
+
+        initializeStartupTasks(taskId, true);
+
+        // main thread owns the newly initialized tasks
+        assertThat(directory.lockOwner(taskId), is(Thread.currentThread()));
+
+        // spawn off a "fake" StreamThread, so we can verify the lock was updated to the correct thread
+        final AtomicReference<Task> result = new AtomicReference<>();
+        final Thread streamThread = new FakeStreamThread(taskId, result);
+        streamThread.start();
+        streamThread.join();
+        final Task task = result.get();
+
+        assertNotNull(task);
+        assertThat(task, instanceOf(StandbyTask.class));
+
+        // verify the owner of the task directory lock has been shifted over to our assigned StreamThread
+        assertThat(directory.lockOwner(taskId), is(instanceOf(FakeStreamThread.class)));
+    }
+
+    @Test
+    public void shouldUnlockStartupTasksOnClose() {
+        final TaskId taskId = new TaskId(0, 0);
+        initializeStartupTasks(taskId, true);
+
+        assertEquals(Thread.currentThread(), directory.lockOwner(taskId));
+        directory.closeStartupTasks();
+        assertNull(directory.lockOwner(taskId));
+    }
+
+    @Test
+    public void shouldCloseStartupTasksOnDirectoryClose() {
+        final StateStore store = initializeStartupTasks(new TaskId(0, 0), true);
+
+        assertTrue(directory.hasStartupTasks());
+        assertTrue(store.isOpen());
+
+        directory.close();
+
+        assertFalse(directory.hasStartupTasks());
+        assertFalse(store.isOpen());
+    }
+
+    @Test
+    public void shouldNotCloseStartupTasksOnAutoCleanUp() {
+        // we need to set this because the auto-cleanup uses the last-modified time from the filesystem,
+        // which can't be mocked
+        time.setCurrentTimeMs(System.currentTimeMillis());
+
+        final StateStore store = initializeStartupTasks(new TaskId(0, 0), true);
+
+        assertTrue(directory.hasStartupTasks());
+        assertTrue(store.isOpen());
+
+        time.sleep(10000);
+
+        directory.cleanRemovedTasks(1000);
+
+        assertTrue(directory.hasStartupTasks());
+        assertTrue(store.isOpen());
+    }
+
+    private StateStore initializeStartupTasks(final TaskId taskId, final boolean createTaskDir) {
+        directory.initializeProcessId();
+        final TopologyMetadata metadata = Mockito.mock(TopologyMetadata.class);
+        final TopologyConfig topologyConfig = new TopologyConfig(config);
+
+        final StateStore store = new MockKeyValueStore("test", true);
+
+        if (createTaskDir) {
+            final File taskDir = directory.getOrCreateDirectoryForTask(taskId);
+            final File storeDir = new File(taskDir, store.name());
+            storeDir.mkdir();
+        }
+
+        final ProcessorTopology processorTopology = new ProcessorTopology(
+                Collections.emptyList(),
+                Collections.emptyMap(),
+                Collections.emptyMap(),
+                Collections.singletonList(store),
+                Collections.emptyList(),
+                Collections.singletonMap(store.name(), store.name() + "-changelog"),
+                Collections.emptySet(),
+                Collections.emptyMap()
+        );
+        Mockito.when(metadata.buildSubtopology(ArgumentMatchers.any())).thenReturn(processorTopology);
+        Mockito.when(metadata.taskConfig(ArgumentMatchers.any())).thenReturn(topologyConfig.getTaskConfig());
+
+        directory.initializeStartupTasks(metadata, new StreamsMetricsImpl(new Metrics(), "test", "processId", "applicationId", time), new LogContext("test"));
+
+        return store;
+    }
+
     private static class FutureStateDirectoryProcessFile {
 
         @JsonProperty
@@ -685,6 +1000,7 @@ public class StateDirectoryTest {
         @JsonProperty
         private final String newField;
 
+        // required by jackson -- do not remove, your IDE may be warning that this is unused but it's lying to you
         public FutureStateDirectoryProcessFile() {
             this.processId = null;
             this.newField = null;

@@ -36,16 +36,17 @@ import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.kstream.StreamJoined;
 import org.apache.kafka.streams.kstream.ValueJoinerWithKey;
 import org.apache.kafka.test.StreamsTestUtils;
-import org.junit.Before;
-import org.junit.Test;
 
-import java.util.Arrays;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
 
+import static java.time.Duration.ofHours;
 import static java.time.Duration.ofMillis;
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class KStreamImplValueJoinerWithKeyTest {
 
@@ -64,7 +65,7 @@ public class KStreamImplValueJoinerWithKeyTest {
 
     private final ValueJoinerWithKey<String, Integer, Integer, String> valueJoinerWithKey =
         (key, lv, rv) -> key + ":" + (lv + (rv == null ? 0 : rv));
-    private final JoinWindows joinWindows = JoinWindows.of(ofMillis(100));
+    private final JoinWindows joinWindows = JoinWindows.ofTimeDifferenceAndGrace(ofMillis(100), ofHours(24L));
     private final StreamJoined<String, Integer, Integer> streamJoined =
             StreamJoined.with(Serdes.String(), Serdes.Integer(), Serdes.Integer());
     private final Joined<String, Integer, Integer> joined =
@@ -72,7 +73,7 @@ public class KStreamImplValueJoinerWithKeyTest {
     private final KeyValueMapper<String, Integer, String> keyValueMapper =
         (k, v) -> k;
 
-    @Before
+    @BeforeEach
     public void setup() {
         builder = new StreamsBuilder();
         leftStream = builder.stream(leftTopic, Consumed.with(Serdes.String(), Serdes.Integer()));
@@ -84,55 +85,56 @@ public class KStreamImplValueJoinerWithKeyTest {
     @Test
     public void shouldIncludeKeyInStreamSteamJoinResults() {
         leftStream.join(
-                rightStream,
-                valueJoinerWithKey,
-                joinWindows,
-                streamJoined
+            rightStream,
+            valueJoinerWithKey,
+            joinWindows,
+            streamJoined
         ).to(outputTopic, Produced.with(Serdes.String(), Serdes.String()));
         // Left KV A, 3, Right KV A, 5
-        runJoinTopology(builder,
-                Collections.singletonList(KeyValue.pair("A", "A:5")),
-                false,
-                rightTopic
+        runJoinTopology(
+            builder,
+            Collections.singletonList(KeyValue.pair("A", "A:5")),
+            false,
+            rightTopic
         );
     }
 
     @Test
     public void shouldIncludeKeyInStreamLeftJoinResults() {
         leftStream.leftJoin(
-                rightStream,
-                valueJoinerWithKey,
-                joinWindows,
-                streamJoined
+            rightStream,
+            valueJoinerWithKey,
+            joinWindows,
+            streamJoined
         ).to(outputTopic, Produced.with(Serdes.String(), Serdes.String()));
         // Left KV A, 3, Right KV A, 5
         // TTD pipes records to left stream first, then right
-        // with TTD there's no caching, so join emits immediately with "A, 3, null" then "A, 3, 5"
-        final List<KeyValue<String, String>> expectedResults = Arrays.asList(KeyValue.pair("A", "A:3"), KeyValue.pair("A", "A:5"));
-        runJoinTopology(builder,
-                expectedResults,
-                false,
-                rightTopic
+        final List<KeyValue<String, String>> expectedResults = Collections.singletonList(KeyValue.pair("A", "A:5"));
+        runJoinTopology(
+            builder,
+            expectedResults,
+            false,
+            rightTopic
         );
     }
 
     @Test
     public void shouldIncludeKeyInStreamOuterJoinResults() {
         leftStream.outerJoin(
-                rightStream,
-                valueJoinerWithKey,
-                joinWindows,
-                streamJoined
+            rightStream,
+            valueJoinerWithKey,
+            joinWindows,
+            streamJoined
         ).to(outputTopic, Produced.with(Serdes.String(), Serdes.String()));
 
         // Left KV A, 3, Right KV A, 5
         // TTD pipes records to left stream first, then right
-        // with TTD there's no caching, so join emits immediately with "A, 3, null" then "A, 3, 5"
-        final List<KeyValue<String, String>> expectedResults = Arrays.asList(KeyValue.pair("A", "A:3"), KeyValue.pair("A", "A:5"));
-        runJoinTopology(builder,
-                expectedResults,
-                false,
-                rightTopic
+        final List<KeyValue<String, String>> expectedResults = Collections.singletonList(KeyValue.pair("A", "A:5"));
+        runJoinTopology(
+            builder,
+            expectedResults,
+            false,
+            rightTopic
         );
     }
 
@@ -144,10 +146,11 @@ public class KStreamImplValueJoinerWithKeyTest {
             joined
         ).to(outputTopic, Produced.with(Serdes.String(), Serdes.String()));
         // Left KV A, 3, Table KV A, 5
-        runJoinTopology(builder,
-                Collections.singletonList(KeyValue.pair("A", "A:5")),
-                true,
-                ktableTopic
+        runJoinTopology(
+            builder,
+            Collections.singletonList(KeyValue.pair("A", "A:5")),
+            true,
+            ktableTopic
         );
     }
 
@@ -159,10 +162,11 @@ public class KStreamImplValueJoinerWithKeyTest {
             joined
         ).to(outputTopic, Produced.with(Serdes.String(), Serdes.String()));
         // Left KV A, 3, Table KV A, 5
-        runJoinTopology(builder,
-                Collections.singletonList(KeyValue.pair("A", "A:5")),
-                true,
-                ktableTopic
+        runJoinTopology(
+            builder,
+            Collections.singletonList(KeyValue.pair("A", "A:5")),
+            true,
+            ktableTopic
         );
     }
 
@@ -174,10 +178,11 @@ public class KStreamImplValueJoinerWithKeyTest {
             valueJoinerWithKey
         ).to(outputTopic, Produced.with(Serdes.String(), Serdes.String()));
         // Left KV A, 3, GlobalTable KV A, 5
-        runJoinTopology(builder,
-                Collections.singletonList(KeyValue.pair("A", "A:5")),
-                true,
-                globalTopic
+        runJoinTopology(
+            builder,
+            Collections.singletonList(KeyValue.pair("A", "A:5")),
+            true,
+            globalTopic
         );
     }
 
@@ -189,10 +194,11 @@ public class KStreamImplValueJoinerWithKeyTest {
            valueJoinerWithKey
         ).to(outputTopic, Produced.with(Serdes.String(), Serdes.String()));
         // Left KV A, 3, GlobalTable KV A, 5
-        runJoinTopology(builder,
-                Collections.singletonList(KeyValue.pair("A", "A:5")),
-                true,
-                globalTopic
+        runJoinTopology(
+            builder,
+            Collections.singletonList(KeyValue.pair("A", "A:5")),
+            true,
+            globalTopic
         );
     }
 

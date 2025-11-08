@@ -32,15 +32,24 @@ public interface Readable {
     int readInt();
     long readLong();
     double readDouble();
-    void readArray(byte[] arr);
+    byte[] readArray(int length);
     int readUnsignedVarint();
     ByteBuffer readByteBuffer(int length);
     int readVarint();
     long readVarlong();
+    int remaining();
+
+    /**
+     * Returns a new Readable object whose content will be shared with this object.
+     * <br>
+     * The content of the new Readable object will start at this Readable's current
+     * position. The two Readable position will be independent, so read from one will
+     * not impact the other.
+     */
+    Readable slice();
 
     default String readString(int length) {
-        byte[] arr = new byte[length];
-        readArray(arr);
+        byte[] arr = readArray(length);
         return new String(arr, StandardCharsets.UTF_8);
     }
 
@@ -48,8 +57,7 @@ public interface Readable {
         if (unknowns == null) {
             unknowns = new ArrayList<>();
         }
-        byte[] data = new byte[size];
-        readArray(data);
+        byte[] data = readArray(size);
         unknowns.add(new RawTaggedField(tag, data));
         return unknowns;
     }
@@ -73,5 +81,9 @@ public interface Readable {
 
     default int readUnsignedShort() {
         return Short.toUnsignedInt(readShort());
+    }
+
+    default long readUnsignedInt() {
+        return Integer.toUnsignedLong(readInt());
     }
 }

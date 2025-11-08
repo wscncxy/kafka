@@ -19,6 +19,7 @@ package org.apache.kafka.clients.admin.internals;
 import org.apache.kafka.clients.admin.DescribeProducersOptions;
 import org.apache.kafka.clients.admin.DescribeProducersResult.PartitionProducerState;
 import org.apache.kafka.clients.admin.internals.AdminApiHandler.ApiResult;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.errors.NotLeaderOrFollowerException;
@@ -34,11 +35,13 @@ import org.apache.kafka.common.requests.DescribeProducersRequest;
 import org.apache.kafka.common.requests.DescribeProducersResponse;
 import org.apache.kafka.common.utils.CollectionUtils;
 import org.apache.kafka.common.utils.LogContext;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -46,94 +49,86 @@ import java.util.stream.Collectors;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
-import static java.util.Collections.emptySet;
 import static java.util.Collections.singletonList;
 import static java.util.Collections.singletonMap;
-import static org.apache.kafka.common.utils.Utils.mkSet;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class DescribeProducersHandlerTest {
     private DescribeProducersHandler newHandler(
-        Set<TopicPartition> topicPartitions,
         DescribeProducersOptions options
     ) {
         return new DescribeProducersHandler(
-            topicPartitions,
             options,
             new LogContext()
         );
     }
+    
 
     @Test
     public void testBrokerIdSetInOptions() {
         int brokerId = 3;
-        Set<TopicPartition> topicPartitions = mkSet(
+        Set<TopicPartition> topicPartitions = Set.of(
             new TopicPartition("foo", 5),
             new TopicPartition("bar", 3),
             new TopicPartition("foo", 4)
         );
 
         DescribeProducersHandler handler = newHandler(
-            topicPartitions,
             new DescribeProducersOptions().brokerId(brokerId)
         );
 
-        AdminApiHandler.Keys<TopicPartition> keys = handler.initializeKeys();
-        assertEquals(emptySet(), keys.dynamicKeys);
-        assertNull(keys.lookupStrategy);
-
-        keys.staticKeys.forEach((topicPartition, mappedBrokerId) -> {
-            assertEquals(brokerId, mappedBrokerId, "Unexpected brokerId for " + topicPartition);
+        topicPartitions.forEach(topicPartition -> {
+            ApiRequestScope scope = handler.lookupStrategy().lookupScope(topicPartition);
+            assertEquals(OptionalInt.of(brokerId), scope.destinationBrokerId(),
+                "Unexpected brokerId for " + topicPartition);
         });
     }
 
     @Test
     public void testBrokerIdNotSetInOptions() {
-        Set<TopicPartition> topicPartitions = mkSet(
+        Set<TopicPartition> topicPartitions = Set.of(
             new TopicPartition("foo", 5),
             new TopicPartition("bar", 3),
             new TopicPartition("foo", 4)
         );
 
         DescribeProducersHandler handler = newHandler(
-            topicPartitions,
             new DescribeProducersOptions()
         );
 
-        AdminApiHandler.Keys<TopicPartition> keys = handler.initializeKeys();
-        assertEquals(emptyMap(), keys.staticKeys);
-        assertTrue(keys.lookupStrategy instanceof PartitionLeaderStrategy);
-        assertEquals(topicPartitions, keys.dynamicKeys);
+        topicPartitions.forEach(topicPartition -> {
+            ApiRequestScope scope = handler.lookupStrategy().lookupScope(topicPartition);
+            assertEquals(OptionalInt.empty(), scope.destinationBrokerId(),
+                "Unexpected brokerId for " + topicPartition);
+        });
     }
 
     @Test
     public void testBuildRequest() {
-        Set<TopicPartition> topicPartitions = mkSet(
+        Set<TopicPartition> topicPartitions = Set.of(
             new TopicPartition("foo", 5),
             new TopicPartition("bar", 3),
             new TopicPartition("foo", 4)
         );
 
         DescribeProducersHandler handler = newHandler(
-            topicPartitions,
             new DescribeProducersOptions()
         );
 
         int brokerId = 3;
-        DescribeProducersRequest.Builder request = handler.buildRequest(brokerId, topicPartitions);
+        DescribeProducersRequest.Builder request = handler.buildBatchedRequest(brokerId, topicPartitions);
 
         List<DescribeProducersRequestData.TopicRequest> topics = request.data.topics();
 
-        assertEquals(mkSet("foo", "bar"), topics.stream()
+        assertEquals(Set.of("foo", "bar"), topics.stream()
             .map(DescribeProducersRequestData.TopicRequest::name)
             .collect(Collectors.toSet()));
 
         topics.forEach(topic -> {
             Set<Integer> expectedTopicPartitions = "foo".equals(topic.name()) ?
-                mkSet(4, 5) : mkSet(3);
+                Set.of(4, 5) : Set.of(3);
             assertEquals(expectedTopicPartitions, new HashSet<>(topic.partitionIndexes()));
         });
     }
@@ -142,25 +137,25 @@ public class DescribeProducersHandlerTest {
     public void testAuthorizationFailure() {
         TopicPartition topicPartition = new TopicPartition("foo", 5);
         Throwable exception = assertFatalError(topicPartition, Errors.TOPIC_AUTHORIZATION_FAILED);
-        assertTrue(exception instanceof TopicAuthorizationException);
+        assertInstanceOf(TopicAuthorizationException.class, exception);
         TopicAuthorizationException authException = (TopicAuthorizationException) exception;
-        assertEquals(mkSet("foo"), authException.unauthorizedTopics());
+        assertEquals(Set.of("foo"), authException.unauthorizedTopics());
     }
 
     @Test
     public void testInvalidTopic() {
         TopicPartition topicPartition = new TopicPartition("foo", 5);
         Throwable exception = assertFatalError(topicPartition, Errors.INVALID_TOPIC_EXCEPTION);
-        assertTrue(exception instanceof InvalidTopicException);
+        assertInstanceOf(InvalidTopicException.class, exception);
         InvalidTopicException invalidTopicException = (InvalidTopicException) exception;
-        assertEquals(mkSet("foo"), invalidTopicException.invalidTopics());
+        assertEquals(Set.of("foo"), invalidTopicException.invalidTopics());
     }
 
     @Test
     public void testUnexpectedError() {
         TopicPartition topicPartition = new TopicPartition("foo", 5);
         Throwable exception = assertFatalError(topicPartition, Errors.UNKNOWN_SERVER_ERROR);
-        assertTrue(exception instanceof UnknownServerException);
+        assertInstanceOf(UnknownServerException.class, exception);
     }
 
     @Test
@@ -188,27 +183,27 @@ public class DescribeProducersHandlerTest {
             handleResponseWithError(options, topicPartition, Errors.NOT_LEADER_OR_FOLLOWER);
         assertEquals(emptyMap(), result.completedKeys);
         assertEquals(emptyList(), result.unmappedKeys);
-        assertEquals(mkSet(topicPartition), result.failedKeys.keySet());
+        assertEquals(Set.of(topicPartition), result.failedKeys.keySet());
         Throwable exception = result.failedKeys.get(topicPartition);
-        assertTrue(exception instanceof NotLeaderOrFollowerException);
+        assertInstanceOf(NotLeaderOrFollowerException.class, exception);
     }
 
     @Test
     public void testCompletedResult() {
         TopicPartition topicPartition = new TopicPartition("foo", 5);
         DescribeProducersOptions options = new DescribeProducersOptions().brokerId(1);
-        DescribeProducersHandler handler = newHandler(mkSet(topicPartition), options);
+        DescribeProducersHandler handler = newHandler(options);
 
-        int brokerId = 3;
         PartitionResponse partitionResponse = sampleProducerState(topicPartition);
         DescribeProducersResponse response = describeProducersResponse(
             singletonMap(topicPartition, partitionResponse)
         );
+        Node node = new Node(3, "host", 1);
 
         ApiResult<TopicPartition, PartitionProducerState> result =
-            handler.handleResponse(brokerId, mkSet(topicPartition), response);
+            handler.handleResponse(node, Set.of(topicPartition), response);
 
-        assertEquals(mkSet(topicPartition), result.completedKeys.keySet());
+        assertEquals(Set.of(topicPartition), result.completedKeys.keySet());
         assertEquals(emptyMap(), result.failedKeys);
         assertEquals(emptyList(), result.unmappedKeys);
 
@@ -235,7 +230,7 @@ public class DescribeProducersHandlerTest {
             new DescribeProducersOptions(), topicPartition, error);
         assertEquals(emptyMap(), result.completedKeys);
         assertEquals(emptyList(), result.unmappedKeys);
-        assertEquals(mkSet(topicPartition), result.failedKeys.keySet());
+        assertEquals(Set.of(topicPartition), result.failedKeys.keySet());
         return result.failedKeys.get(topicPartition);
     }
 
@@ -244,10 +239,10 @@ public class DescribeProducersHandlerTest {
         TopicPartition topicPartition,
         Errors error
     ) {
-        DescribeProducersHandler handler = newHandler(mkSet(topicPartition), options);
-        int brokerId = options.brokerId().orElse(3);
+        DescribeProducersHandler handler = newHandler(options);
         DescribeProducersResponse response = buildResponseWithError(topicPartition, error);
-        return handler.handleResponse(brokerId, mkSet(topicPartition), response);
+        Node node = new Node(options.brokerId().orElse(3), "host", 1);
+        return handler.handleResponse(node, Set.of(topicPartition), response);
     }
 
     private DescribeProducersResponse buildResponseWithError(

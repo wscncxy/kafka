@@ -16,12 +16,8 @@
  */
 package org.apache.kafka.tools;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import net.sourceforge.argparse4j.ArgumentParsers;
-import net.sourceforge.argparse4j.inf.ArgumentParser;
-import net.sourceforge.argparse4j.inf.Namespace;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -32,24 +28,35 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.OutOfOrderSequenceException;
 import org.apache.kafka.common.errors.ProducerFencedException;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.utils.Exit;
+import org.apache.kafka.common.utils.Utils;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import net.sourceforge.argparse4j.ArgumentParsers;
+import net.sourceforge.argparse4j.inf.ArgumentParser;
+import net.sourceforge.argparse4j.inf.Namespace;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.time.Duration;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static java.util.Collections.singleton;
 import static net.sourceforge.argparse4j.impl.Arguments.store;
 import static net.sourceforge.argparse4j.impl.Arguments.storeTrue;
 
@@ -58,7 +65,7 @@ import static net.sourceforge.argparse4j.impl.Arguments.storeTrue;
  * topic transactionally, committing the offsets and messages together.
  */
 public class TransactionalMessageCopier {
-
+    private static final Logger log = LoggerFactory.getLogger(TransactionalMessageCopier.class);
     private static final DateFormat FORMAT = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss:SSS");
 
     /** Get the command-line argument parser. */
@@ -232,13 +239,13 @@ public class TransactionalMessageCopier {
             if (offsetAndMetadata != null)
                 consumer.seek(tp, offsetAndMetadata.offset());
             else
-                consumer.seekToBeginning(singleton(tp));
+                consumer.seekToBeginning(Set.of(tp));
         });
     }
 
     private static long messagesRemaining(KafkaConsumer<String, String> consumer, TopicPartition partition) {
         long currentPosition = consumer.position(partition);
-        Map<TopicPartition, Long> endOffsets = consumer.endOffsets(singleton(partition));
+        Map<TopicPartition, Long> endOffsets = consumer.endOffsets(Set.of(partition));
         if (endOffsets.containsKey(partition)) {
             return endOffsets.get(partition) - currentPosition;
         }
@@ -256,29 +263,46 @@ public class TransactionalMessageCopier {
         return json;
     }
 
-    private static synchronized String statusAsJson(long totalProcessed, long consumedSinceLastRebalanced, long remaining, String transactionalId, String stage) {
-        Map<String, Object> statusData = new HashMap<>();
-        statusData.put("progress", transactionalId);
+    private static synchronized String statusAsJson(
+        String stage,
+        long totalProcessed,
+        long consumedSinceLastRebalanced,
+        long remaining,
+        String transactionalId
+    ) {
+        Map<String, Object> statusData = new LinkedHashMap<>();
+        statusData.put("transactionalId", transactionalId);
+        statusData.put("stage", stage);
+        statusData.put("time", FORMAT.format(new Date()));
         statusData.put("totalProcessed", totalProcessed);
         statusData.put("consumed", consumedSinceLastRebalanced);
         statusData.put("remaining", remaining);
-        statusData.put("time", FORMAT.format(new Date()));
-        statusData.put("stage", stage);
         return toJsonString(statusData);
     }
 
-    private static synchronized String shutDownString(long totalProcessed, long consumedSinceLastRebalanced, long remaining, String transactionalId) {
-        Map<String, Object> shutdownData = new HashMap<>();
-        shutdownData.put("shutdown_complete", transactionalId);
-        shutdownData.put("totalProcessed", totalProcessed);
-        shutdownData.put("consumed", consumedSinceLastRebalanced);
-        shutdownData.put("remaining", remaining);
-        shutdownData.put("time", FORMAT.format(new Date()));
-        return toJsonString(shutdownData);
+    private static void abortTransactionAndResetPosition(
+        KafkaProducer<String, String> producer,
+        KafkaConsumer<String, String> consumer
+    ) {
+        producer.abortTransaction();
+        resetToLastCommittedPositions(consumer);
     }
 
     public static void main(String[] args) {
         Namespace parsedArgs = argParser().parseArgsOrFail(args);
+        try {
+            runEventLoop(parsedArgs);
+            Exit.exit(0);
+        } catch (Exception e) {
+            log.error("Shutting down after unexpected error in event loop", e);
+            System.err.println("Shutting down after unexpected error " + e.getClass().getSimpleName()
+                + ": " + e.getMessage() + " (see the log for additional detail)");
+            Exit.exit(1);
+        }
+    }
+
+    @SuppressWarnings("removal")
+    public static void runEventLoop(Namespace parsedArgs) {
         final String transactionalId = parsedArgs.getString("transactionalId");
         final String outputTopic = parsedArgs.getString("outputTopic");
 
@@ -295,7 +319,7 @@ public class TransactionalMessageCopier {
         final AtomicLong numMessagesProcessedSinceLastRebalance = new AtomicLong(0);
         final AtomicLong totalMessageProcessed = new AtomicLong(0);
         if (groupMode) {
-            consumer.subscribe(Collections.singleton(topicName), new ConsumerRebalanceListener() {
+            consumer.subscribe(Set.of(topicName), new ConsumerRebalanceListener() {
                 @Override
                 public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
                 }
@@ -306,13 +330,18 @@ public class TransactionalMessageCopier {
                         .mapToLong(partition -> messagesRemaining(consumer, partition)).sum());
                     numMessagesProcessedSinceLastRebalance.set(0);
                     // We use message cap for remaining here as the remainingMessages are not set yet.
-                    System.out.println(statusAsJson(totalMessageProcessed.get(),
-                        numMessagesProcessedSinceLastRebalance.get(), remainingMessages.get(), transactionalId, "RebalanceComplete"));
+                    System.out.println(statusAsJson(
+                        "RebalanceComplete",
+                        totalMessageProcessed.get(),
+                        numMessagesProcessedSinceLastRebalance.get(),
+                        remainingMessages.get(),
+                        transactionalId
+                    ));
                 }
             });
         } else {
             TopicPartition inputPartition = new TopicPartition(topicName, parsedArgs.getInt("inputPartition"));
-            consumer.assign(singleton(inputPartition));
+            consumer.assign(Set.of(inputPartition));
             remainingMessages.set(Math.min(messagesRemaining(consumer, inputPartition), remainingMessages.get()));
         }
 
@@ -324,23 +353,27 @@ public class TransactionalMessageCopier {
 
         Exit.addShutdownHook("transactional-message-copier-shutdown-hook", () -> {
             isShuttingDown.set(true);
-            // Flush any remaining messages
-            producer.close();
-            synchronized (consumer) {
-                consumer.close();
-            }
-            System.out.println(shutDownString(totalMessageProcessed.get(),
-                numMessagesProcessedSinceLastRebalance.get(), remainingMessages.get(), transactionalId));
+            consumer.wakeup();
+            System.out.println(statusAsJson(
+                "ShutdownComplete",
+                totalMessageProcessed.get(),
+                numMessagesProcessedSinceLastRebalance.get(),
+                remainingMessages.get(),
+                transactionalId
+            ));
         });
 
         final boolean useGroupMetadata = parsedArgs.getBoolean("useGroupMetadata");
         try {
             Random random = new Random();
-            while (remainingMessages.get() > 0) {
-                System.out.println(statusAsJson(totalMessageProcessed.get(),
-                    numMessagesProcessedSinceLastRebalance.get(), remainingMessages.get(), transactionalId, "ProcessLoop"));
-                if (isShuttingDown.get())
-                    break;
+            while (!isShuttingDown.get() && remainingMessages.get() > 0) {
+                System.out.println(statusAsJson(
+                    "ProcessLoop",
+                    totalMessageProcessed.get(),
+                    numMessagesProcessedSinceLastRebalance.get(),
+                    remainingMessages.get(),
+                    transactionalId
+                ));
 
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(200));
                 if (records.count() > 0) {
@@ -353,35 +386,34 @@ public class TransactionalMessageCopier {
 
                         long messagesSentWithinCurrentTxn = records.count();
 
-                        if (useGroupMetadata) {
-                            producer.sendOffsetsToTransaction(consumerPositions(consumer), consumer.groupMetadata());
-                        } else {
-                            producer.sendOffsetsToTransaction(consumerPositions(consumer), consumerGroup);
-                        }
+                        ConsumerGroupMetadata groupMetadata = useGroupMetadata ? consumer.groupMetadata() : new ConsumerGroupMetadata(consumerGroup);
+                        producer.sendOffsetsToTransaction(consumerPositions(consumer), groupMetadata);
 
                         if (enableRandomAborts && random.nextInt() % 3 == 0) {
-                            throw new KafkaException("Aborting transaction");
+                            abortTransactionAndResetPosition(producer, consumer);
                         } else {
                             producer.commitTransaction();
                             remainingMessages.getAndAdd(-messagesSentWithinCurrentTxn);
                             numMessagesProcessedSinceLastRebalance.getAndAdd(messagesSentWithinCurrentTxn);
                             totalMessageProcessed.getAndAdd(messagesSentWithinCurrentTxn);
                         }
-                    } catch (ProducerFencedException | OutOfOrderSequenceException e) {
-                        // We cannot recover from these errors, so just rethrow them and let the process fail
-                        throw e;
+                    } catch (ProducerFencedException e) {
+                        throw new KafkaException(String.format("The transactional.id %s has been claimed by another process", transactionalId), e);
                     } catch (KafkaException e) {
-                        producer.abortTransaction();
-                        resetToLastCommittedPositions(consumer);
+                        log.debug("Aborting transaction after catching exception", e);
+                        abortTransactionAndResetPosition(producer, consumer);
                     }
                 }
             }
-        } finally {
-            producer.close();
-            synchronized (consumer) {
-                consumer.close();
+        } catch (WakeupException e) {
+            if (!isShuttingDown.get()) {
+                // Let the exception propagate if the exception was not raised
+                // as part of shutdown.
+                throw e;
             }
+        } finally {
+            Utils.closeQuietly(producer, "producer");
+            Utils.closeQuietly(consumer, "consumer");
         }
-        Exit.exit(0);
     }
 }

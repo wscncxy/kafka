@@ -17,27 +17,27 @@
 package org.apache.kafka.streams.processor.internals.assignment;
 
 import org.apache.kafka.clients.CommonClientConfigs;
-import org.apache.kafka.clients.consumer.ConsumerPartitionAssignor.RebalanceProtocol;
 import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.StreamsConfig.InternalConfig;
+import org.apache.kafka.streams.processor.assignment.AssignmentConfigs;
 import org.apache.kafka.streams.processor.internals.ClientUtils;
 import org.apache.kafka.streams.processor.internals.InternalTopicManager;
+
 import org.slf4j.Logger;
 
 import java.util.Map;
+import java.util.Optional;
 
 import static org.apache.kafka.common.utils.Utils.getHost;
 import static org.apache.kafka.common.utils.Utils.getPort;
 import static org.apache.kafka.streams.StreamsConfig.InternalConfig.INTERNAL_TASK_ASSIGNOR_CLASS;
-import static org.apache.kafka.streams.processor.internals.assignment.StreamsAssignmentProtocolVersions.LATEST_SUPPORTED_VERSION;
 
 public final class AssignorConfiguration {
-    private final String taskAssignorClass;
+    private final String internalTaskAssignorClass;
 
     private final String logPrefix;
     private final Logger log;
@@ -80,9 +80,9 @@ public final class AssignorConfiguration {
         {
             final String o = (String) configs.get(INTERNAL_TASK_ASSIGNOR_CLASS);
             if (o == null) {
-                taskAssignorClass = HighAvailabilityTaskAssignor.class.getName();
+                internalTaskAssignorClass = HighAvailabilityTaskAssignor.class.getName();
             } else {
-                taskAssignorClass = o;
+                internalTaskAssignorClass = o;
             }
         }
     }
@@ -91,68 +91,8 @@ public final class AssignorConfiguration {
         return referenceContainer;
     }
 
-    public RebalanceProtocol rebalanceProtocol() {
-        final String upgradeFrom = streamsConfig.getString(StreamsConfig.UPGRADE_FROM_CONFIG);
-        if (upgradeFrom != null) {
-            switch (upgradeFrom) {
-                case StreamsConfig.UPGRADE_FROM_0100:
-                case StreamsConfig.UPGRADE_FROM_0101:
-                case StreamsConfig.UPGRADE_FROM_0102:
-                case StreamsConfig.UPGRADE_FROM_0110:
-                case StreamsConfig.UPGRADE_FROM_10:
-                case StreamsConfig.UPGRADE_FROM_11:
-                case StreamsConfig.UPGRADE_FROM_20:
-                case StreamsConfig.UPGRADE_FROM_21:
-                case StreamsConfig.UPGRADE_FROM_22:
-                case StreamsConfig.UPGRADE_FROM_23:
-                    log.info("Eager rebalancing enabled now for upgrade from {}.x", upgradeFrom);
-                    return RebalanceProtocol.EAGER;
-                default:
-                    throw new IllegalArgumentException("Unknown configuration value for parameter 'upgrade.from': " + upgradeFrom);
-            }
-        }
-        log.info("Cooperative rebalancing enabled now");
-        return RebalanceProtocol.COOPERATIVE;
-    }
-
     public String logPrefix() {
         return logPrefix;
-    }
-
-    public int configuredMetadataVersion(final int priorVersion) {
-        final String upgradeFrom = streamsConfig.getString(StreamsConfig.UPGRADE_FROM_CONFIG);
-        if (upgradeFrom != null) {
-            switch (upgradeFrom) {
-                case StreamsConfig.UPGRADE_FROM_0100:
-                    log.info(
-                        "Downgrading metadata version from {} to 1 for upgrade from 0.10.0.x.",
-                        LATEST_SUPPORTED_VERSION
-                    );
-                    return 1;
-                case StreamsConfig.UPGRADE_FROM_0101:
-                case StreamsConfig.UPGRADE_FROM_0102:
-                case StreamsConfig.UPGRADE_FROM_0110:
-                case StreamsConfig.UPGRADE_FROM_10:
-                case StreamsConfig.UPGRADE_FROM_11:
-                    log.info(
-                        "Downgrading metadata version from {} to 2 for upgrade from {}.x.",
-                        LATEST_SUPPORTED_VERSION,
-                        upgradeFrom
-                    );
-                    return 2;
-                case StreamsConfig.UPGRADE_FROM_20:
-                case StreamsConfig.UPGRADE_FROM_21:
-                case StreamsConfig.UPGRADE_FROM_22:
-                case StreamsConfig.UPGRADE_FROM_23:
-                    // These configs are for cooperative rebalancing and should not affect the metadata version
-                    break;
-                default:
-                    throw new IllegalArgumentException(
-                        "Unknown configuration value for parameter 'upgrade.from': " + upgradeFrom
-                    );
-            }
-        }
-        return priorVersion;
     }
 
     public String userEndPoint() {
@@ -191,15 +131,35 @@ public final class AssignorConfiguration {
     }
 
     public AssignmentConfigs assignmentConfigs() {
-        return new AssignmentConfigs(streamsConfig);
+        return AssignmentConfigs.of(streamsConfig);
     }
 
-    public TaskAssignor taskAssignor() {
+    public LegacyTaskAssignor taskAssignor() {
         try {
-            return Utils.newInstance(taskAssignorClass, TaskAssignor.class);
+            return Utils.newInstance(internalTaskAssignorClass, LegacyTaskAssignor.class);
         } catch (final ClassNotFoundException e) {
             throw new IllegalArgumentException(
                 "Expected an instantiable class name for " + INTERNAL_TASK_ASSIGNOR_CLASS,
+                e
+            );
+        }
+    }
+
+    public Optional<org.apache.kafka.streams.processor.assignment.TaskAssignor> customTaskAssignor() {
+        final String userTaskAssignorClassname = streamsConfig.getString(StreamsConfig.TASK_ASSIGNOR_CLASS_CONFIG);
+        if (userTaskAssignorClassname == null) {
+            log.info("No custom task assignors found, defaulting to internal task assignment with {}", INTERNAL_TASK_ASSIGNOR_CLASS);
+            return Optional.empty();
+        }
+        try {
+            final org.apache.kafka.streams.processor.assignment.TaskAssignor assignor = Utils.newInstance(userTaskAssignorClassname,
+                org.apache.kafka.streams.processor.assignment.TaskAssignor.class);
+            log.info("Instantiated {} as the task assignor.", userTaskAssignorClassname);
+            assignor.configure(streamsConfig.originals());
+            return Optional.of(assignor);
+        } catch (final ClassNotFoundException e) {
+            throw new IllegalArgumentException(
+                "Expected an instantiable class name for " + StreamsConfig.TASK_ASSIGNOR_CLASS_CONFIG + " but got " + userTaskAssignorClassname,
                 e
             );
         }
@@ -224,47 +184,5 @@ public final class AssignorConfiguration {
 
     public interface AssignmentListener {
         void onAssignmentComplete(final boolean stable);
-    }
-
-    public static class AssignmentConfigs {
-        public final long acceptableRecoveryLag;
-        public final int maxWarmupReplicas;
-        public final int numStandbyReplicas;
-        public final long probingRebalanceIntervalMs;
-
-        private AssignmentConfigs(final StreamsConfig configs) {
-            acceptableRecoveryLag = configs.getLong(StreamsConfig.ACCEPTABLE_RECOVERY_LAG_CONFIG);
-            maxWarmupReplicas = configs.getInt(StreamsConfig.MAX_WARMUP_REPLICAS_CONFIG);
-            numStandbyReplicas = configs.getInt(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG);
-            probingRebalanceIntervalMs = configs.getLong(StreamsConfig.PROBING_REBALANCE_INTERVAL_MS_CONFIG);
-        }
-
-        AssignmentConfigs(final Long acceptableRecoveryLag,
-                          final Integer maxWarmupReplicas,
-                          final Integer numStandbyReplicas,
-                          final Long probingRebalanceIntervalMs) {
-            this.acceptableRecoveryLag = validated(StreamsConfig.ACCEPTABLE_RECOVERY_LAG_CONFIG, acceptableRecoveryLag);
-            this.maxWarmupReplicas = validated(StreamsConfig.MAX_WARMUP_REPLICAS_CONFIG, maxWarmupReplicas);
-            this.numStandbyReplicas = validated(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, numStandbyReplicas);
-            this.probingRebalanceIntervalMs = validated(StreamsConfig.PROBING_REBALANCE_INTERVAL_MS_CONFIG, probingRebalanceIntervalMs);
-        }
-
-        private static <T> T validated(final String configKey, final T value) {
-            final ConfigDef.Validator validator = StreamsConfig.configDef().configKeys().get(configKey).validator;
-            if (validator != null) {
-                validator.ensureValid(configKey, value);
-            }
-            return value;
-        }
-
-        @Override
-        public String toString() {
-            return "AssignmentConfigs{" +
-                "\n  acceptableRecoveryLag=" + acceptableRecoveryLag +
-                "\n  maxWarmupReplicas=" + maxWarmupReplicas +
-                "\n  numStandbyReplicas=" + numStandbyReplicas +
-                "\n  probingRebalanceIntervalMs=" + probingRebalanceIntervalMs +
-                "\n}";
-        }
     }
 }

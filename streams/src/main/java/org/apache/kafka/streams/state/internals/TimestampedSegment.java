@@ -16,7 +16,9 @@
  */
 package org.apache.kafka.streams.state.internals;
 
+import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.streams.query.Position;
 import org.apache.kafka.streams.state.internals.metrics.RocksDBMetricsRecorder;
 
 import java.io.File;
@@ -30,14 +32,21 @@ class TimestampedSegment extends RocksDBTimestampedStore implements Comparable<T
     TimestampedSegment(final String segmentName,
                        final String windowName,
                        final long id,
+                       final Position position,
                        final RocksDBMetricsRecorder metricsRecorder) {
         super(segmentName, windowName, metricsRecorder);
         this.id = id;
+        this.position = position;
     }
 
     @Override
     public void destroy() throws IOException {
         Utils.delete(dbDir);
+    }
+
+    @Override
+    public void deleteRange(final Bytes keyFrom, final Bytes keyTo) {
+        throw new UnsupportedOperationException();
     }
 
     @Override

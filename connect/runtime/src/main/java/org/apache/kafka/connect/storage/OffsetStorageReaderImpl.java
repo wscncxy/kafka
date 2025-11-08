@@ -18,15 +18,15 @@ package org.apache.kafka.connect.storage;
 
 import org.apache.kafka.connect.data.SchemaAndValue;
 import org.apache.kafka.connect.errors.ConnectException;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
@@ -34,7 +34,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Implementation of OffsetStorageReader. Unlike OffsetStorageWriter which is implemented
+ * Implementation of OffsetStorageReader. Unlike {@link OffsetStorageWriter} which is implemented
  * directly, the interface is only separate from this implementation because it needs to be
  * included in the public API package.
  */
@@ -60,7 +60,7 @@ public class OffsetStorageReaderImpl implements CloseableOffsetStorageReader {
 
     @Override
     public <T> Map<String, Object> offset(Map<String, T> partition) {
-        return offsets(Collections.singletonList(partition)).get(partition);
+        return offsets(List.of(partition)).get(partition);
     }
 
     @Override
@@ -72,7 +72,7 @@ public class OffsetStorageReaderImpl implements CloseableOffsetStorageReader {
             try {
                 // Offsets are treated as schemaless, their format is only validated here (and the returned value below)
                 OffsetUtils.validateFormat(key);
-                byte[] keySerialized = keyConverter.fromConnectData(namespace, null, Arrays.asList(namespace, key));
+                byte[] keySerialized = keyConverter.fromConnectData(namespace, null, List.of(namespace, key));
                 ByteBuffer keyBuffer = (keySerialized != null) ? ByteBuffer.wrap(keySerialized) : null;
                 serializedToOriginal.put(keyBuffer, key);
             } catch (Throwable t) {
@@ -141,6 +141,7 @@ public class OffsetStorageReaderImpl implements CloseableOffsetStorageReader {
         return result;
     }
 
+    @Override
     public void close() {
         if (!closed.getAndSet(true)) {
             synchronized (offsetReadFutures) {

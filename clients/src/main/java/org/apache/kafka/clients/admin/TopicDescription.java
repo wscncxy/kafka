@@ -20,12 +20,12 @@ package org.apache.kafka.clients.admin;
 import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.acl.AclOperation;
-import org.apache.kafka.common.utils.Utils;
 
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * A detailed description of a single topic in the cluster.
@@ -72,13 +72,23 @@ public class TopicDescription {
      * @param internal Whether the topic is internal to Kafka
      * @param partitions A list of partitions where the index represents the partition id and the element contains
      *                   leadership and replica information for that partition.
-     * @param authorizedOperations authorized operations for this topic, or null if this is not known.
+     * @param authorizedOperations authorized operations for this topic, or empty set if this is not known.
      */
     public TopicDescription(String name, boolean internal, List<TopicPartitionInfo> partitions,
                             Set<AclOperation> authorizedOperations) {
         this(name, internal, partitions, authorizedOperations, Uuid.ZERO_UUID);
     }
 
+    /**
+     * Create an instance with the specified parameters.
+     *
+     * @param name The topic name
+     * @param internal Whether the topic is internal to Kafka
+     * @param partitions A list of partitions where the index represents the partition id and the element contains
+     *                   leadership and replica information for that partition.
+     * @param authorizedOperations authorized operations for this topic, or empty set if this is not known.
+     * @param topicId the topic id
+     */
     public TopicDescription(String name, boolean internal, List<TopicPartitionInfo> partitions,
                             Set<AclOperation> authorizedOperations, Uuid topicId) {
         this.name = name;
@@ -125,6 +135,6 @@ public class TopicDescription {
     @Override
     public String toString() {
         return "(name=" + name + ", internal=" + internal + ", partitions=" +
-            Utils.join(partitions, ",") + ", authorizedOperations=" + authorizedOperations + ")";
+                partitions.stream().map(TopicPartitionInfo::toString).collect(Collectors.joining(",")) + ", authorizedOperations=" + authorizedOperations + ")";
     }
 }

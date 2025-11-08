@@ -17,10 +17,11 @@
 package org.apache.kafka.streams.state.internals;
 
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StoreQueryParameters;
 import org.apache.kafka.streams.errors.InvalidStateStoreException;
-import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.internals.ProcessorStateManager;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.KeyValueStore;
@@ -31,20 +32,22 @@ import org.apache.kafka.test.InternalMockProcessorContext;
 import org.apache.kafka.test.MockRecordCollector;
 import org.apache.kafka.test.NoOpReadOnlyStore;
 import org.apache.kafka.test.StateStoreProviderStub;
-import org.junit.Before;
-import org.junit.Test;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.LinkedList;
 import java.util.List;
 import java.util.NoSuchElementException;
 
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
-import static org.apache.kafka.test.StreamsTestUtils.toList;
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.apache.kafka.test.StreamsTestUtils.toListAndCloseIterator;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class CompositeReadOnlyKeyValueStoreTest {
 
@@ -54,7 +57,7 @@ public class CompositeReadOnlyKeyValueStoreTest {
     private KeyValueStore<String, String> otherUnderlyingStore;
     private CompositeReadOnlyKeyValueStore<String, String> theStore;
 
-    @Before
+    @BeforeEach
     public void before() {
         final StateStoreProviderStub stubProviderOne = new StateStoreProviderStub(false);
         stubProviderTwo = new StateStoreProviderStub(false);
@@ -76,11 +79,18 @@ public class CompositeReadOnlyKeyValueStoreTest {
             Serdes.String())
             .build();
 
-        final InternalMockProcessorContext context = new InternalMockProcessorContext(new StateSerdes<>(ProcessorStateManager.storeChangelogTopic("appId", storeName),
-            Serdes.String(), Serdes.String()), new MockRecordCollector());
+        final InternalMockProcessorContext<String, String> context =
+            new InternalMockProcessorContext<>(
+                new StateSerdes<>(
+                    ProcessorStateManager.storeChangelogTopic("appId", storeName, null),
+                    Serdes.String(),
+                    Serdes.String()
+                ),
+                new MockRecordCollector()
+            );
         context.setTime(1L);
 
-        store.init((StateStoreContext) context, store);
+        store.init(context, store);
 
         return store;
     }
@@ -96,23 +106,74 @@ public class CompositeReadOnlyKeyValueStoreTest {
     }
 
     @Test
-    public void shouldThrowNullPointerExceptionOnRangeNullFromKey() {
-        assertThrows(NullPointerException.class, () -> theStore.range(null, "to"));
+    public void shouldReturnValueOnRangeNullFromKey() {
+        stubOneUnderlying.put("0", "zero");
+        stubOneUnderlying.put("1", "one");
+        stubOneUnderlying.put("2", "two");
+
+        final LinkedList<KeyValue<String, String>> expectedContents = new LinkedList<>();
+        expectedContents.add(new KeyValue<>("0", "zero"));
+        expectedContents.add(new KeyValue<>("1", "one"));
+
+        try (final KeyValueIterator<String, String> iterator = theStore.range(null, "1")) {
+            assertEquals(expectedContents, Utils.toList(iterator));
+        }
     }
 
     @Test
-    public void shouldThrowNullPointerExceptionOnRangeNullToKey() {
-        assertThrows(NullPointerException.class, () -> theStore.range("from", null));
+    public void shouldReturnValueOnRangeNullToKey() {
+        stubOneUnderlying.put("0", "zero");
+        stubOneUnderlying.put("1", "one");
+        stubOneUnderlying.put("2", "two");
+
+        final LinkedList<KeyValue<String, String>> expectedContents = new LinkedList<>();
+        expectedContents.add(new KeyValue<>("1", "one"));
+        expectedContents.add(new KeyValue<>("2", "two"));
+
+        try (final KeyValueIterator<String, String> iterator = theStore.range("1", null)) {
+            assertEquals(expectedContents, Utils.toList(iterator));
+        }
     }
 
     @Test
-    public void shouldThrowNullPointerExceptionOnReverseRangeNullFromKey() {
-        assertThrows(NullPointerException.class, () -> theStore.reverseRange(null, "to"));
+    public void shouldThrowNullPointerExceptionOnPrefixScanNullPrefix() {
+        assertThrows(NullPointerException.class, () -> theStore.prefixScan(null, new StringSerializer()));
+    }
+
+    @SuppressWarnings("resource")
+    @Test
+    public void shouldThrowNullPointerExceptionOnPrefixScanNullPrefixKeySerializer() {
+        assertThrows(NullPointerException.class, () -> theStore.prefixScan("aa", null));
     }
 
     @Test
-    public void shouldThrowNullPointerExceptionOnReverseRangeNullToKey() {
-        assertThrows(NullPointerException.class, () -> theStore.reverseRange("from", null));
+    public void shouldReturnValueOnReverseRangeNullFromKey() {
+        stubOneUnderlying.put("0", "zero");
+        stubOneUnderlying.put("1", "one");
+        stubOneUnderlying.put("2", "two");
+
+        final LinkedList<KeyValue<String, String>> expectedContents = new LinkedList<>();
+        expectedContents.add(new KeyValue<>("1", "one"));
+        expectedContents.add(new KeyValue<>("0", "zero"));
+
+        try (final KeyValueIterator<String, String> iterator = theStore.reverseRange(null, "1")) {
+            assertEquals(expectedContents, Utils.toList(iterator));
+        }
+    }
+
+    @Test
+    public void shouldReturnValueOnReverseRangeNullToKey() {
+        stubOneUnderlying.put("0", "zero");
+        stubOneUnderlying.put("1", "one");
+        stubOneUnderlying.put("2", "two");
+
+        final LinkedList<KeyValue<String, String>> expectedContents = new LinkedList<>();
+        expectedContents.add(new KeyValue<>("2", "two"));
+        expectedContents.add(new KeyValue<>("1", "one"));
+
+        try (final KeyValueIterator<String, String> iterator = theStore.reverseRange("1", null)) {
+            assertEquals(expectedContents, Utils.toList(iterator));
+        }
     }
 
     @Test
@@ -130,39 +191,71 @@ public class CompositeReadOnlyKeyValueStoreTest {
     @Test
     public void shouldThrowNoSuchElementExceptionWhileNext() {
         stubOneUnderlying.put("a", "1");
-        final KeyValueIterator<String, String> keyValueIterator = theStore.range("a", "b");
-        keyValueIterator.next();
-        assertThrows(NoSuchElementException.class, keyValueIterator::next);
+        try (final KeyValueIterator<String, String> keyValueIterator = theStore.range("a", "b")) {
+            keyValueIterator.next();
+            assertThrows(NoSuchElementException.class, keyValueIterator::next);
+        }
     }
 
     @Test
     public void shouldThrowNoSuchElementExceptionWhilePeekNext() {
         stubOneUnderlying.put("a", "1");
-        final KeyValueIterator<String, String> keyValueIterator = theStore.range("a", "b");
-        keyValueIterator.next();
-        assertThrows(NoSuchElementException.class, keyValueIterator::peekNextKey);
+        try (final KeyValueIterator<String, String> keyValueIterator = theStore.range("a", "b")) {
+            keyValueIterator.next();
+            assertThrows(NoSuchElementException.class, keyValueIterator::peekNextKey);
+        }
+    }
+
+    @Test
+    public void shouldThrowNoSuchElementExceptionWhileNextForPrefixScan() {
+        stubOneUnderlying.put("a", "1");
+        try (final KeyValueIterator<String, String> keyValueIterator = theStore.prefixScan("a", new StringSerializer())) {
+            keyValueIterator.next();
+            assertThrows(NoSuchElementException.class, keyValueIterator::next);
+        }
+    }
+
+    @Test
+    public void shouldThrowNoSuchElementExceptionWhilePeekNextForPrefixScan() {
+        stubOneUnderlying.put("a", "1");
+        try (final KeyValueIterator<String, String> keyValueIterator = theStore.prefixScan("a", new StringSerializer())) {
+            keyValueIterator.next();
+            assertThrows(NoSuchElementException.class, keyValueIterator::peekNextKey);
+        }
     }
 
     @Test
     public void shouldThrowUnsupportedOperationExceptionWhileRemove() {
-        final KeyValueIterator<String, String> keyValueIterator = theStore.all();
-        assertThrows(UnsupportedOperationException.class, keyValueIterator::remove);
+        try (final KeyValueIterator<String, String> keyValueIterator = theStore.all()) {
+            assertThrows(UnsupportedOperationException.class, keyValueIterator::remove);
+        }
     }
 
     @Test
     public void shouldThrowUnsupportedOperationExceptionWhileReverseRange() {
         stubOneUnderlying.put("a", "1");
         stubOneUnderlying.put("b", "1");
-        final KeyValueIterator<String, String> keyValueIterator = theStore.reverseRange("a", "b");
-        assertThrows(UnsupportedOperationException.class, keyValueIterator::remove);
+        try (final KeyValueIterator<String, String> keyValueIterator = theStore.reverseRange("a", "b")) {
+            assertThrows(UnsupportedOperationException.class, keyValueIterator::remove);
+        }
     }
 
     @Test
     public void shouldThrowUnsupportedOperationExceptionWhileRange() {
         stubOneUnderlying.put("a", "1");
         stubOneUnderlying.put("b", "1");
-        final KeyValueIterator<String, String> keyValueIterator = theStore.range("a", "b");
-        assertThrows(UnsupportedOperationException.class, keyValueIterator::remove);
+        try (final KeyValueIterator<String, String> keyValueIterator = theStore.range("a", "b")) {
+            assertThrows(UnsupportedOperationException.class, keyValueIterator::remove);
+        }
+    }
+
+    @Test
+    public void shouldThrowUnsupportedOperationExceptionWhilePrefixScan() {
+        stubOneUnderlying.put("a", "1");
+        stubOneUnderlying.put("b", "1");
+        try (final KeyValueIterator<String, String> keyValueIterator = theStore.prefixScan("a", new StringSerializer())) {
+            assertThrows(UnsupportedOperationException.class, keyValueIterator::remove);
+        }
     }
 
     @Test
@@ -183,7 +276,7 @@ public class CompositeReadOnlyKeyValueStoreTest {
         stubOneUnderlying.put("b", "b");
         stubOneUnderlying.put("c", "c");
 
-        final List<KeyValue<String, String>> results = toList(theStore.range("a", "b"));
+        final List<KeyValue<String, String>> results = toListAndCloseIterator(theStore.range("a", "b"));
         assertTrue(results.contains(new KeyValue<>("a", "a")));
         assertTrue(results.contains(new KeyValue<>("b", "b")));
         assertEquals(2, results.size());
@@ -195,13 +288,36 @@ public class CompositeReadOnlyKeyValueStoreTest {
         stubOneUnderlying.put("b", "b");
         stubOneUnderlying.put("c", "c");
 
-        final List<KeyValue<String, String>> results = toList(theStore.reverseRange("a", "b"));
+        final List<KeyValue<String, String>> results = toListAndCloseIterator(theStore.reverseRange("a", "b"));
         assertArrayEquals(
             asList(
                 new KeyValue<>("b", "b"),
                 new KeyValue<>("a", "a")
             ).toArray(),
             results.toArray());
+    }
+
+    @Test
+    public void shouldReturnKeysWithGivenPrefixExcludingNextKeyLargestKey() {
+        stubOneUnderlying.put("abc", "a");
+        stubOneUnderlying.put("abcd", "b");
+        stubOneUnderlying.put("abce", "c");
+
+        final List<KeyValue<String, String>> results = toListAndCloseIterator(theStore.prefixScan("abcd", new StringSerializer()));
+        assertTrue(results.contains(new KeyValue<>("abcd", "b")));
+        assertEquals(1, results.size());
+    }
+
+    @Test
+    public void shouldSupportPrefixScan() {
+        stubOneUnderlying.put("a", "a");
+        stubOneUnderlying.put("aa", "b");
+        stubOneUnderlying.put("b", "c");
+
+        final List<KeyValue<String, String>> results = toListAndCloseIterator(theStore.prefixScan("a", new StringSerializer()));
+        assertTrue(results.contains(new KeyValue<>("a", "a")));
+        assertTrue(results.contains(new KeyValue<>("aa", "b")));
+        assertEquals(2, results.size());
     }
 
     @Test
@@ -217,13 +333,36 @@ public class CompositeReadOnlyKeyValueStoreTest {
         cache.put("d", "d");
         cache.put("x", "x");
 
-        final List<KeyValue<String, String>> results = toList(theStore.range("a", "e"));
+        final List<KeyValue<String, String>> results = toListAndCloseIterator(theStore.range("a", "e"));
         assertArrayEquals(
             asList(
                 new KeyValue<>("a", "a"),
                 new KeyValue<>("b", "b"),
                 new KeyValue<>("c", "c"),
                 new KeyValue<>("d", "d")
+            ).toArray(),
+            results.toArray());
+    }
+
+    @Test
+    public void shouldSupportPrefixScanAcrossMultipleKVStores() {
+        final KeyValueStore<String, String> cache = newStoreInstance();
+        stubProviderTwo.addStore(storeName, cache);
+
+        stubOneUnderlying.put("a", "a");
+        stubOneUnderlying.put("b", "b");
+        stubOneUnderlying.put("z", "z");
+
+        cache.put("aa", "c");
+        cache.put("ab", "d");
+        cache.put("x", "x");
+
+        final List<KeyValue<String, String>> results = toListAndCloseIterator(theStore.prefixScan("a", new StringSerializer()));
+        assertArrayEquals(
+            asList(
+                new KeyValue<>("a", "a"),
+                new KeyValue<>("aa", "c"),
+                new KeyValue<>("ab", "d")
             ).toArray(),
             results.toArray());
     }
@@ -241,7 +380,7 @@ public class CompositeReadOnlyKeyValueStoreTest {
         cache.put("d", "d");
         cache.put("x", "x");
 
-        final List<KeyValue<String, String>> results = toList(theStore.reverseRange("a", "e"));
+        final List<KeyValue<String, String>> results = toListAndCloseIterator(theStore.reverseRange("a", "e"));
         assertTrue(results.contains(new KeyValue<>("a", "a")));
         assertTrue(results.contains(new KeyValue<>("b", "b")));
         assertTrue(results.contains(new KeyValue<>("c", "c")));
@@ -262,7 +401,7 @@ public class CompositeReadOnlyKeyValueStoreTest {
         cache.put("d", "d");
         cache.put("x", "x");
 
-        final List<KeyValue<String, String>> results = toList(theStore.all());
+        final List<KeyValue<String, String>> results = toListAndCloseIterator(theStore.all());
         assertTrue(results.contains(new KeyValue<>("a", "a")));
         assertTrue(results.contains(new KeyValue<>("b", "b")));
         assertTrue(results.contains(new KeyValue<>("c", "c")));
@@ -285,7 +424,7 @@ public class CompositeReadOnlyKeyValueStoreTest {
         cache.put("d", "d");
         cache.put("x", "x");
 
-        final List<KeyValue<String, String>> results = toList(theStore.reverseAll());
+        final List<KeyValue<String, String>> results = toListAndCloseIterator(theStore.reverseAll());
         assertTrue(results.contains(new KeyValue<>("a", "a")));
         assertTrue(results.contains(new KeyValue<>("b", "b")));
         assertTrue(results.contains(new KeyValue<>("c", "c")));
@@ -305,21 +444,31 @@ public class CompositeReadOnlyKeyValueStoreTest {
         assertThrows(InvalidStateStoreException.class, () -> rebalancing().approximateNumEntries());
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void shouldThrowInvalidStoreExceptionOnRangeDuringRebalance() {
         assertThrows(InvalidStateStoreException.class, () -> rebalancing().range("anything", "something"));
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void shouldThrowInvalidStoreExceptionOnReverseRangeDuringRebalance() {
         assertThrows(InvalidStateStoreException.class, () -> rebalancing().reverseRange("anything", "something"));
     }
 
+    @SuppressWarnings("resource")
+    @Test
+    public void shouldThrowInvalidStoreExceptionOnPrefixScanDuringRebalance() {
+        assertThrows(InvalidStateStoreException.class, () -> rebalancing().prefixScan("anything", new StringSerializer()));
+    }
+
+    @SuppressWarnings("resource")
     @Test
     public void shouldThrowInvalidStoreExceptionOnAllDuringRebalance() {
         assertThrows(InvalidStateStoreException.class, () -> rebalancing().all());
     }
 
+    @SuppressWarnings("resource")
     @Test
     public void shouldThrowInvalidStoreExceptionOnReverseAllDuringRebalance() {
         assertThrows(InvalidStateStoreException.class, () -> rebalancing().reverseAll());
@@ -343,7 +492,7 @@ public class CompositeReadOnlyKeyValueStoreTest {
 
     @Test
     public void shouldReturnLongMaxValueOnOverflow() {
-        stubProviderTwo.addStore(storeName, new NoOpReadOnlyStore<Object, Object>() {
+        stubProviderTwo.addStore(storeName, new NoOpReadOnlyStore<>() {
             @Override
             public long approximateNumEntries() {
                 return Long.MAX_VALUE;
@@ -356,13 +505,13 @@ public class CompositeReadOnlyKeyValueStoreTest {
 
     @Test
     public void shouldReturnLongMaxValueOnUnderflow() {
-        stubProviderTwo.addStore(storeName, new NoOpReadOnlyStore<Object, Object>() {
+        stubProviderTwo.addStore(storeName, new NoOpReadOnlyStore<>() {
             @Override
             public long approximateNumEntries() {
                 return Long.MAX_VALUE;
             }
         });
-        stubProviderTwo.addStore("my-storeA", new NoOpReadOnlyStore<Object, Object>() {
+        stubProviderTwo.addStore("my-storeA", new NoOpReadOnlyStore<>() {
             @Override
             public long approximateNumEntries() {
                 return Long.MAX_VALUE;
@@ -381,5 +530,4 @@ public class CompositeReadOnlyKeyValueStoreTest {
             storeName
         );
     }
-
 }

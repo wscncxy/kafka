@@ -22,10 +22,11 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
-import org.apache.kafka.streams.TopologyTestDriver;
 import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.streams.TestOutputTopic;
+import org.apache.kafka.streams.TopologyTestDriver;
 import org.apache.kafka.test.TestUtils;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,20 +58,14 @@ public class WordCountDemoTest {
         final StreamsBuilder builder = new StreamsBuilder();
         //Create Actual Stream Processing pipeline
         WordCountDemo.createWordCountStream(builder);
-        testDriver = new TopologyTestDriver(builder.build(), WordCountDemo.getStreamsConfig(null));
+        testDriver = new TopologyTestDriver(builder.build(), WordCountDemo.streamsConfig(null));
         inputTopic = testDriver.createInputTopic(WordCountDemo.INPUT_TOPIC, new StringSerializer(), new StringSerializer());
         outputTopic = testDriver.createOutputTopic(WordCountDemo.OUTPUT_TOPIC, new StringDeserializer(), new LongDeserializer());
     }
 
     @AfterEach
     public void tearDown() {
-        try {
-            testDriver.close();
-        } catch (final RuntimeException e) {
-            // https://issues.apache.org/jira/browse/KAFKA-6647 causes exception when executed in Windows, ignoring it
-            // Logged stacktrace cannot be avoided
-            System.out.println("Ignoring exception, test failing in Windows due this exception:" + e.getLocalizedMessage());
-        }
+        testDriver.close();
     }
 
 
@@ -116,13 +111,13 @@ public class WordCountDemoTest {
     }
 
     @Test
-    public void testGetStreamsConfig() throws IOException {
+    public void testStreamsConfig() throws IOException {
         final File tmp = TestUtils.tempFile("bootstrap.servers=localhost:1234");
         try {
-            Properties config = WordCountDemo.getStreamsConfig(new String[] {tmp.getPath()});
+            Properties config = WordCountDemo.streamsConfig(new String[] {tmp.getPath()});
             assertThat("localhost:1234", equalTo(config.getProperty(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG)));
 
-            config = WordCountDemo.getStreamsConfig(new String[] {tmp.getPath(), "extra", "args"});
+            config = WordCountDemo.streamsConfig(new String[] {tmp.getPath(), "extra", "args"});
             assertThat("localhost:1234", equalTo(config.getProperty(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG)));
         } finally {
             Files.deleteIfExists(tmp.toPath());

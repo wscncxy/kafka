@@ -17,8 +17,6 @@
 
 package org.apache.kafka.streams.processor.internals;
 
-import java.util.HashMap;
-import java.util.Map;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.IntegerDeserializer;
 import org.apache.kafka.common.serialization.LongDeserializer;
@@ -32,6 +30,7 @@ import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.streams.TestOutputTopic;
 import org.apache.kafka.streams.Topology;
+import org.apache.kafka.streams.TopologyConfig;
 import org.apache.kafka.streams.TopologyTestDriver;
 import org.apache.kafka.streams.kstream.Aggregator;
 import org.apache.kafka.streams.kstream.Consumed;
@@ -44,32 +43,35 @@ import org.apache.kafka.streams.kstream.Named;
 import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.kstream.Reducer;
 import org.apache.kafka.streams.kstream.StreamJoined;
-import org.apache.kafka.streams.processor.AbstractProcessor;
+import org.apache.kafka.streams.processor.api.ContextualFixedKeyProcessor;
+import org.apache.kafka.streams.processor.api.FixedKeyRecord;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.state.Stores;
 import org.apache.kafka.test.StreamsTestUtils;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import static java.time.Duration.ofDays;
 import static java.time.Duration.ofMillis;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
+@SuppressWarnings("deprecation")
 public class RepartitionOptimizingTest {
-
-    private final Logger log = LoggerFactory.getLogger(RepartitionOptimizingTest.class);
 
     private static final String INPUT_TOPIC = "input";
     private static final String COUNT_TOPIC = "outputTopic_0";
@@ -105,23 +107,18 @@ public class RepartitionOptimizingTest {
     private final List<String> expectedCollectedProcessorValues =
         Arrays.asList("FOO", "BAR", "BAZ");
 
-    @Before
+    @BeforeEach
     public void setUp() {
         streamsConfiguration = StreamsTestUtils.getStreamsConfig(Serdes.String(), Serdes.String());
-        streamsConfiguration.setProperty(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, Integer.toString(1024 * 10));
-        streamsConfiguration.setProperty(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, Integer.toString(5000));
+        streamsConfiguration.setProperty(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, Integer.toString(1024 * 10));
+        streamsConfiguration.setProperty(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, Long.toString(5000));
 
         processorValueCollector.clear();
     }
 
-    @After
+    @AfterEach
     public void tearDown() {
-        try {
-            topologyTestDriver.close();
-        } catch (final RuntimeException e) {
-            log.warn("The following exception was thrown while trying to close the TopologyTestDriver (note that " +
-                "KAFKA-6647 causes this when running on Windows):", e);
-        }
+        topologyTestDriver.close();
     }
 
     @Test
@@ -134,9 +131,7 @@ public class RepartitionOptimizingTest {
         runTest(StreamsConfig.NO_OPTIMIZATION, FOUR_REPARTITION_TOPICS);
     }
 
-
     private void runTest(final String optimizationConfig, final int expectedNumberRepartitionTopics) {
-
         final StreamsBuilder builder = new StreamsBuilder();
 
         final KStream<String, String> sourceStream =
@@ -185,12 +180,12 @@ public class RepartitionOptimizingTest {
             .filter((k, v) -> k.equals("A"), Named.as("join-filter"))
             .join(countStream, (v1, v2) -> v1 + ":" + v2.toString(),
                   JoinWindows.of(ofMillis(5000)),
-                  StreamJoined.<String, String, Long>with(Stores.inMemoryWindowStore("join-store", ofDays(1).plus(ofMillis(10000)), ofMillis(10000), true),
-                                                          Stores.inMemoryWindowStore("other-join-store", ofDays(1).plus(ofMillis(10000)), ofMillis(10000), true))
-                                                    .withName("join")
-                                                    .withKeySerde(Serdes.String())
-                                                    .withValueSerde(Serdes.String())
-                                                    .withOtherValueSerde(Serdes.Long()))
+                  StreamJoined.<String, String, Long>with(Stores.inMemoryWindowStore("join-store", ofDays(1), ofMillis(10000), true),
+                                       Stores.inMemoryWindowStore("other-join-store", ofDays(1), ofMillis(10000), true))
+                          .withName("join")
+                          .withKeySerde(Serdes.String())
+                          .withValueSerde(Serdes.String())
+                          .withOtherValueSerde(Serdes.Long()))
             .to(JOINED_TOPIC, Produced.as("join-to"));
 
         streamsConfiguration.setProperty(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, optimizationConfig);
@@ -228,6 +223,38 @@ public class RepartitionOptimizingTest {
         assertThat(joinedOutputTopic.readKeyValuesToMap(), equalTo(keyValueListToMap(expectedJoinKeyValues)));
     }
 
+    @Test
+    public void shouldNotPushRepartitionAcrossValueChangingOperation() {
+        streamsConfiguration.setProperty(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
+        streamsConfiguration.setProperty(TopologyConfig.InternalConfig.ENABLE_PROCESS_PROCESSVALUE_FIX, "true");
+
+        final StreamsBuilder builder = new StreamsBuilder(new TopologyConfig(new StreamsConfig(streamsConfiguration)));
+
+        builder.stream(INPUT_TOPIC, Consumed.with(Serdes.String(), Serdes.String()).withName("sourceStream"))
+            .map((k, v) -> KeyValue.pair(k.toUpperCase(Locale.getDefault()), v))
+            .processValues(() -> new ContextualFixedKeyProcessor<String, String, Integer>() {
+                @Override
+                public void process(final FixedKeyRecord<String, String> record) {
+                    context().forward(record.withValue(record.value().length()));
+                }
+            })
+            .groupByKey(Grouped.valueSerde(new Serdes.IntegerSerde()))
+            .reduce(Integer::sum)
+            .toStream()
+            .to(AGGREGATION_TOPIC);
+
+        final Topology topology = builder.build(streamsConfiguration);
+
+        topologyTestDriver = new TopologyTestDriver(topology, streamsConfiguration);
+
+        final TestInputTopic<String, String> inputTopic = topologyTestDriver.createInputTopic(INPUT_TOPIC, stringSerializer, stringSerializer);
+        final TestOutputTopic<String, Integer> outputTopic = topologyTestDriver.createOutputTopic(AGGREGATION_TOPIC, stringDeserializer, new IntegerDeserializer());
+
+        inputTopic.pipeKeyValueList(getKeyValues());
+
+        assertThat(outputTopic.readKeyValuesToMap(), equalTo(keyValueListToMap(expectedAggKeyValues)));
+    }
+
     private <K, V> Map<K, V> keyValueListToMap(final List<KeyValue<K, V>> keyValuePairs) {
         final Map<K, V> map = new HashMap<>();
         for (final KeyValue<K, V> pair : keyValuePairs) {
@@ -257,7 +284,7 @@ public class RepartitionOptimizingTest {
         return keyValueList;
     }
 
-    private static class SimpleProcessor extends AbstractProcessor<String, String> {
+    private static class SimpleProcessor implements Processor<String, String, Void, Void> {
 
         final List<String> valueList;
 
@@ -266,8 +293,8 @@ public class RepartitionOptimizingTest {
         }
 
         @Override
-        public void process(final String key, final String value) {
-            valueList.add(value);
+        public void process(final Record<String, String> record) {
+            valueList.add(record.value());
         }
     }
 

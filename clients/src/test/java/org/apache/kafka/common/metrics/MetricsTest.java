@@ -16,35 +16,9 @@
  */
 package org.apache.kafka.common.metrics;
 
-import static java.util.Collections.emptyList;
-import static java.util.Collections.singletonList;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Deque;
-import java.util.List;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Random;
-import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Function;
-
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
+import org.apache.kafka.common.metrics.internals.MetricsUtils;
 import org.apache.kafka.common.metrics.stats.Avg;
 import org.apache.kafka.common.metrics.stats.CumulativeSum;
 import org.apache.kafka.common.metrics.stats.Max;
@@ -54,29 +28,55 @@ import org.apache.kafka.common.metrics.stats.Percentile;
 import org.apache.kafka.common.metrics.stats.Percentiles;
 import org.apache.kafka.common.metrics.stats.Percentiles.BucketSizing;
 import org.apache.kafka.common.metrics.stats.Rate;
-import org.apache.kafka.common.metrics.stats.WindowedCount;
-import org.apache.kafka.common.metrics.stats.WindowedSum;
 import org.apache.kafka.common.metrics.stats.SimpleRate;
 import org.apache.kafka.common.metrics.stats.Value;
+import org.apache.kafka.common.metrics.stats.WindowedCount;
+import org.apache.kafka.common.metrics.stats.WindowedSum;
 import org.apache.kafka.common.utils.MockTime;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singletonList;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 public class MetricsTest {
     private static final Logger log = LoggerFactory.getLogger(MetricsTest.class);
-
     private static final double EPS = 0.000001;
-    private MockTime time = new MockTime();
-    private MetricConfig config = new MetricConfig();
+
+    private final MockTime time = new MockTime();
+    private final MetricConfig config = new MetricConfig();
     private Metrics metrics;
     private ExecutorService executorService;
 
     @BeforeEach
     public void setup() {
-        this.metrics = new Metrics(config, Arrays.asList(new JmxReporter()), time, true);
+        this.metrics = new Metrics(config, singletonList(new JmxReporter()), time, true);
     }
 
     @AfterEach
@@ -91,22 +91,19 @@ public class MetricsTest {
     @Test
     public void testMetricName() {
         MetricName n1 = metrics.metricName("name", "group", "description", "key1", "value1", "key2", "value2");
-        Map<String, String> tags = new HashMap<String, String>();
+        Map<String, String> tags = new HashMap<>();
         tags.put("key1", "value1");
         tags.put("key2", "value2");
         MetricName n2 = metrics.metricName("name", "group", "description", tags);
         assertEquals(n1, n2, "metric names created in two different ways should be equal");
 
-        try {
-            metrics.metricName("name", "group", "description", "key1");
-            fail("Creating MetricName with an odd number of keyValue should fail");
-        } catch (IllegalArgumentException e) {
-            // this is expected
-        }
+        assertThrows(IllegalArgumentException.class,
+            () -> metrics.metricName("name", "group", "description", "key1"),
+            "Creating MetricName with an odd number of keyValue should fail, IllegalArgumentException expected.");
     }
 
     @Test
-    public void testSimpleStats() throws Exception {
+    public void testSimpleStats() {
         verifyStats(m -> (double) m.metricValue());
     }
 
@@ -120,8 +117,8 @@ public class MetricsTest {
         s.add(metrics.metricName("test.min", "grp1"), new Min());
         s.add(new Meter(TimeUnit.SECONDS, metrics.metricName("test.rate", "grp1"),
                 metrics.metricName("test.total", "grp1")));
-        s.add(new Meter(TimeUnit.SECONDS, new WindowedCount(), metrics.metricName("test.occurences", "grp1"),
-                metrics.metricName("test.occurences.total", "grp1")));
+        s.add(new Meter(TimeUnit.SECONDS, new WindowedCount(), metrics.metricName("test.occurrences", "grp1"),
+                metrics.metricName("test.occurrences.total", "grp1")));
         s.add(metrics.metricName("test.count", "grp1"), new WindowedCount());
         s.add(new Percentiles(100, -100, 100, BucketSizing.CONSTANT,
                              new Percentile(metrics.metricName("test.median", "grp1"), 50.0),
@@ -139,7 +136,7 @@ public class MetricsTest {
         }
         // prior to any time passing
         double elapsedSecs = (config.timeWindowMs() * (config.samples() - 1)) / 1000.0;
-        assertEquals(count / elapsedSecs, metricValueFunc.apply(metrics.metrics().get(metrics.metricName("test.occurences", "grp1"))), EPS,
+        assertEquals(count / elapsedSecs, metricValueFunc.apply(metrics.metrics().get(metrics.metricName("test.occurrences", "grp1"))), EPS,
             String.format("Occurrences(0...%d) = %f", count, count / elapsedSecs));
 
         // pretend 2 seconds passed...
@@ -157,7 +154,7 @@ public class MetricsTest {
             "Min(0...9) = 0");
         assertEquals(sum / elapsedSecs, metricValueFunc.apply(metrics.metric(metrics.metricName("test.rate", "grp1"))), EPS,
             "Rate(0...9) = 1.40625");
-        assertEquals(count / elapsedSecs, metricValueFunc.apply(metrics.metric(metrics.metricName("test.occurences", "grp1"))), EPS,
+        assertEquals(count / elapsedSecs, metricValueFunc.apply(metrics.metric(metrics.metricName("test.occurrences", "grp1"))), EPS,
             String.format("Occurrences(0...%d) = %f", count, count / elapsedSecs));
         assertEquals(count, metricValueFunc.apply(metrics.metric(metrics.metricName("test.count", "grp1"))), EPS,
             "Count(0...9) = 10");
@@ -196,7 +193,7 @@ public class MetricsTest {
         assertEquals(1.0 + c1, p2, EPS);
         assertEquals(1.0 + c1 + c2, p1, EPS);
         assertEquals(Arrays.asList(child1, child2), metrics.childrenSensors().get(parent1));
-        assertEquals(Arrays.asList(child1), metrics.childrenSensors().get(parent2));
+        assertEquals(singletonList(child1), metrics.childrenSensors().get(parent2));
         assertNull(metrics.childrenSensors().get(grandchild));
     }
 
@@ -304,12 +301,12 @@ public class MetricsTest {
         assertNotNull(
                 metrics.metrics().get(metrics.metricName("test.s2.count", "grp1")), "MetricName test.s2.count must be present");
 
-        // After another 1 second sleep, the metric should be purged
-        time.sleep(1000);
+        // After another 1001 ms sleep, the metric should be purged
+        time.sleep(1001);
         purger.run();
-        assertNull(metrics.getSensor("test.s1"), "Sensor test.s2 should have been purged");
+        assertNull(metrics.getSensor("test.s2"), "Sensor test.s2 should have been purged");
         assertNull(
-                metrics.metrics().get(metrics.metricName("test.s1.count", "grp1")), "MetricName test.s2.count should have been purged");
+                metrics.metrics().get(metrics.metricName("test.s2.count", "grp1")), "MetricName test.s2.count should have been purged");
 
         // After purging, it should be possible to recreate a metric
         s1 = metrics.sensor("test.s1", null, 1);
@@ -333,17 +330,6 @@ public class MetricsTest {
         assertNull(metrics.metrics().get(metrics.metricName("test2", "grp1")));
 
         assertEquals(size, metrics.metrics().size());
-    }
-
-    @Test
-    public void testEventWindowing() {
-        WindowedCount count = new WindowedCount();
-        MetricConfig config = new MetricConfig().eventWindow(1).samples(2);
-        count.record(config, 1.0, time.milliseconds());
-        count.record(config, 1.0, time.milliseconds());
-        assertEquals(2.0, count.measure(config, time.milliseconds()), EPS);
-        count.record(config, 1.0, time.milliseconds()); // first event times out
-        assertEquals(2.0, count.measure(config, time.milliseconds()), EPS);
     }
 
     @Test
@@ -429,20 +415,14 @@ public class MetricsTest {
         sensor.add(metrics.metricName("test1.total", "grp1"), new CumulativeSum(), new MetricConfig().quota(Quota.upperBound(5.0)));
         sensor.add(metrics.metricName("test2.total", "grp1"), new CumulativeSum(), new MetricConfig().quota(Quota.lowerBound(0.0)));
         sensor.record(5.0);
-        try {
-            sensor.record(1.0);
-            fail("Should have gotten a quota violation.");
-        } catch (QuotaViolationException e) {
-            // this is good
-        }
+        assertThrows(QuotaViolationException.class,
+            () -> sensor.record(1.0),
+            "Should have gotten a quota violation.");
         assertEquals(6.0, (Double) metrics.metrics().get(metrics.metricName("test1.total", "grp1")).metricValue(), EPS);
         sensor.record(-6.0);
-        try {
-            sensor.record(-1.0);
-            fail("Should have gotten a quota violation.");
-        } catch (QuotaViolationException e) {
-            // this is good
-        }
+        assertThrows(QuotaViolationException.class,
+            () -> sensor.record(-1.0),
+            "Should have gotten a quota violation.");
     }
 
     @Test
@@ -450,11 +430,11 @@ public class MetricsTest {
         final Quota quota1 = Quota.upperBound(10.5);
         final Quota quota2 = Quota.lowerBound(10.5);
 
-        assertFalse(quota1.equals(quota2), "Quota with different upper values shouldn't be equal");
+        assertNotEquals(quota1, quota2, "Quota with different upper values shouldn't be equal");
 
         final Quota quota3 = Quota.lowerBound(10.5);
 
-        assertTrue(quota2.equals(quota3), "Quota with same upper and bound values should be equal");
+        assertEquals(quota2, quota3, "Quota with same upper and bound values should be equal");
     }
 
     @Test
@@ -474,28 +454,13 @@ public class MetricsTest {
         Metric p50 = this.metrics.metrics().get(metrics.metricName("test.p50", "grp1"));
         Metric p75 = this.metrics.metrics().get(metrics.metricName("test.p75", "grp1"));
 
-        // record two windows worth of sequential values
+        // record 100 sequential values
         for (int i = 0; i < buckets; i++)
             sensor.record(i);
 
-        assertEquals(25, (Double) p25.metricValue(), 1.0);
-        assertEquals(50, (Double) p50.metricValue(), 1.0);
-        assertEquals(75, (Double) p75.metricValue(), 1.0);
-
-        for (int i = 0; i < buckets; i++)
-            sensor.record(0.0);
-
-        assertEquals(0.0, (Double) p25.metricValue(), 1.0);
-        assertEquals(0.0, (Double) p50.metricValue(), 1.0);
-        assertEquals(0.0, (Double) p75.metricValue(), 1.0);
-
-        // record two more windows worth of sequential values
-        for (int i = 0; i < buckets; i++)
-            sensor.record(i);
-
-        assertEquals(25, (Double) p25.metricValue(), 1.0);
-        assertEquals(50, (Double) p50.metricValue(), 1.0);
-        assertEquals(75, (Double) p75.metricValue(), 1.0);
+        assertEquals(25, (Double) p25.metricValue());
+        assertEquals(50, (Double) p50.metricValue());
+        assertEquals(75, (Double) p75.metricValue());
     }
 
     @Test
@@ -581,7 +546,7 @@ public class MetricsTest {
     }
 
     @Test
-    public void testRateWindowing() throws Exception {
+    public void testRateWindowing() {
         // Use the default time window. Set 3 samples
         MetricConfig cfg = new MetricConfig().samples(3);
         Sensor s = metrics.sensor("test.sensor", cfg);
@@ -607,15 +572,15 @@ public class MetricsTest {
         // Sleep for half the window.
         time.sleep(cfg.timeWindowMs() / 2);
 
-        // prior to any time passing
-        double elapsedSecs = (cfg.timeWindowMs() * (cfg.samples() - 1) + cfg.timeWindowMs() / 2) / 1000.0;
+        // prior to any time passing, elapsedSecs = sampleWindowSize * (total samples - half of final sample)
+        double elapsedSecs = MetricsUtils.convert(cfg.timeWindowMs(), TimeUnit.SECONDS) * (cfg.samples() - 0.5);
 
         KafkaMetric rateMetric = metrics.metrics().get(rateMetricName);
         KafkaMetric countRateMetric = metrics.metrics().get(countRateMetricName);
         assertEquals(sum / elapsedSecs, (Double) rateMetric.metricValue(), EPS, "Rate(0...2) = 2.666");
         assertEquals(count / elapsedSecs, (Double) countRateMetric.metricValue(), EPS, "Count rate(0...2) = 0.02666");
         assertEquals(elapsedSecs,
-                ((Rate) rateMetric.measurable()).windowSize(cfg, time.milliseconds()) / 1000, EPS, "Elapsed Time = 75 seconds");
+                MetricsUtils.convert(((Rate) rateMetric.measurable()).windowSize(cfg, time.milliseconds()), TimeUnit.SECONDS), EPS, "Elapsed Time = 75 seconds");
         assertEquals(sum, (Double) totalMetric.metricValue(), EPS);
         assertEquals(count, (Double) countTotalMetric.metricValue(), EPS);
 
@@ -695,54 +660,44 @@ public class MetricsTest {
     private Double measure(Measurable rate, MetricConfig config) {
         return rate.measure(config, time.milliseconds());
     }
-    
+
     @Test
     public void testMetricInstances() {
         MetricName n1 = metrics.metricInstance(SampleMetrics.METRIC1, "key1", "value1", "key2", "value2");
-        Map<String, String> tags = new HashMap<String, String>();
+        Map<String, String> tags = new HashMap<>();
         tags.put("key1", "value1");
         tags.put("key2", "value2");
         MetricName n2 = metrics.metricInstance(SampleMetrics.METRIC2, tags);
         assertEquals(n1, n2, "metric names created in two different ways should be equal");
 
-        try {
-            metrics.metricInstance(SampleMetrics.METRIC1, "key1");
-            fail("Creating MetricName with an odd number of keyValue should fail");
-        } catch (IllegalArgumentException e) {
-            // this is expected
-        }
-        
+        assertThrows(IllegalArgumentException.class,
+            () -> metrics.metricInstance(SampleMetrics.METRIC1, "key1"),
+            "Creating MetricName with an odd number of keyValue should fail, IllegalArgumentException expected.");
+
         Map<String, String> parentTagsWithValues = new HashMap<>();
         parentTagsWithValues.put("parent-tag", "parent-tag-value");
 
         Map<String, String> childTagsWithValues = new HashMap<>();
         childTagsWithValues.put("child-tag", "child-tag-value");
 
-        try (Metrics inherited = new Metrics(new MetricConfig().tags(parentTagsWithValues), Arrays.asList(new JmxReporter()), time, true)) {
+        try (Metrics inherited = new Metrics(new MetricConfig().tags(parentTagsWithValues), singletonList(new JmxReporter()), time, true)) {
             MetricName inheritedMetric = inherited.metricInstance(SampleMetrics.METRIC_WITH_INHERITED_TAGS, childTagsWithValues);
 
             Map<String, String> filledOutTags = inheritedMetric.tags();
-            assertEquals(filledOutTags.get("parent-tag"), "parent-tag-value", "parent-tag should be set properly");
-            assertEquals(filledOutTags.get("child-tag"), "child-tag-value", "child-tag should be set properly");
+            assertEquals("parent-tag-value", filledOutTags.get("parent-tag"), "parent-tag should be set properly");
+            assertEquals("child-tag-value", filledOutTags.get("child-tag"), "child-tag should be set properly");
 
-            try {
-                inherited.metricInstance(SampleMetrics.METRIC_WITH_INHERITED_TAGS, parentTagsWithValues);
-                fail("Creating MetricName should fail if the child metrics are not defined at runtime");
-            } catch (IllegalArgumentException e) {
-                // this is expected
-            }
+            assertThrows(IllegalArgumentException.class,
+                () -> inherited.metricInstance(SampleMetrics.METRIC_WITH_INHERITED_TAGS, parentTagsWithValues),
+                "Creating MetricName should throw IllegalArgumentException if the child metrics are not defined at runtime.");
 
-            try {
+            Map<String, String> runtimeTags = new HashMap<>();
+            runtimeTags.put("child-tag", "child-tag-value");
+            runtimeTags.put("tag-not-in-template", "unexpected-value");
 
-                Map<String, String> runtimeTags = new HashMap<>();
-                runtimeTags.put("child-tag", "child-tag-value");
-                runtimeTags.put("tag-not-in-template", "unexpected-value");
-
-                inherited.metricInstance(SampleMetrics.METRIC_WITH_INHERITED_TAGS, runtimeTags);
-                fail("Creating MetricName should fail if there is a tag at runtime that is not in the template");
-            } catch (IllegalArgumentException e) {
-                // this is expected
-            }
+            assertThrows(IllegalArgumentException.class,
+                () -> inherited.metricInstance(SampleMetrics.METRIC_WITH_INHERITED_TAGS, runtimeTags),
+                "Creating MetricName should throw IllegalArgumentException if there is a tag at runtime that is not in the template.");
         }
     }
 
@@ -751,7 +706,7 @@ public class MetricsTest {
      * in errors or deadlock.
      */
     @Test
-    public void testConcurrentReadUpdate() throws Exception {
+    public void testConcurrentReadUpdate() {
         final Random random = new Random();
         final Deque<Sensor> sensors = new ConcurrentLinkedDeque<>();
         metrics = new Metrics(new MockTime(10));
@@ -783,10 +738,10 @@ public class MetricsTest {
      * that synchronizes on every reporter method doesn't result in errors or deadlock.
      */
     @Test
-    public void testConcurrentReadUpdateReport() throws Exception {
+    public void testConcurrentReadUpdateReport() {
 
         class LockingReporter implements MetricsReporter {
-            Map<MetricName, KafkaMetric> activeMetrics = new HashMap<>();
+            final Map<MetricName, KafkaMetric> activeMetrics = new HashMap<>();
             @Override
             public synchronized void init(List<KafkaMetric> metrics) {
             }
@@ -818,7 +773,7 @@ public class MetricsTest {
 
         final LockingReporter reporter = new LockingReporter();
         this.metrics.close();
-        this.metrics = new Metrics(config, Arrays.asList(reporter), new MockTime(10), true);
+        this.metrics = new Metrics(config, singletonList(reporter), new MockTime(10), true);
         final Deque<Sensor> sensors = new ConcurrentLinkedDeque<>();
         SensorCreator sensorCreator = new SensorCreator(metrics);
 
@@ -849,7 +804,7 @@ public class MetricsTest {
         alive.set(false);
     }
 
-    private class ConcurrentMetricOperation implements Runnable {
+    private static class ConcurrentMetricOperation implements Runnable {
         private final AtomicBoolean alive;
         private final String opName;
         private final Runnable op;
@@ -883,7 +838,7 @@ public class MetricsTest {
         PERCENTILES(9),
         METER(10);
 
-        int id;
+        final int id;
         StatType(int id) {
             this.id = id;
         }

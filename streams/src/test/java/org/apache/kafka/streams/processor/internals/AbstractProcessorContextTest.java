@@ -16,11 +16,13 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.streams.StreamsConfig;
@@ -30,13 +32,16 @@ import org.apache.kafka.streams.processor.Punctuator;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.To;
+import org.apache.kafka.streams.processor.api.FixedKeyRecord;
 import org.apache.kafka.streams.processor.api.Record;
+import org.apache.kafka.streams.query.Position;
 import org.apache.kafka.streams.state.RocksDBConfigSetter;
 import org.apache.kafka.streams.state.internals.ThreadCache;
 import org.apache.kafka.streams.state.internals.ThreadCache.DirtyEntryFlushListener;
 import org.apache.kafka.test.MockKeyValueStore;
-import org.junit.Before;
-import org.junit.Test;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.Properties;
@@ -47,18 +52,18 @@ import static org.hamcrest.CoreMatchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.emptyIterable;
 import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class AbstractProcessorContextTest {
 
     private final MockStreamsMetrics metrics = new MockStreamsMetrics(new Metrics());
-    private final AbstractProcessorContext context = new TestProcessorContext(metrics);
+    private final AbstractProcessorContext<?, ?> context = new TestProcessorContext(metrics);
     private final MockKeyValueStore stateStore = new MockKeyValueStore("store", false);
     private final Headers headers = new RecordHeaders(new Header[]{new RecordHeader("key", "value".getBytes())});
     private final ProcessorRecordContext recordContext = new ProcessorRecordContext(10, System.currentTimeMillis(), 1, "foo", headers);
 
-    @Before
+    @BeforeEach
     public void before() {
         context.setRecordContext(recordContext);
     }
@@ -92,7 +97,7 @@ public class AbstractProcessorContextTest {
 
     @Test
     public void shouldNotThrowNullPointerExceptionOnTopicIfRecordContextTopicIsNull() {
-        context.setRecordContext(new ProcessorRecordContext(0, 0, 0, null, null));
+        context.setRecordContext(new ProcessorRecordContext(0, 0, 0, null, new RecordHeaders()));
         assertThat(context.topic(), nullValue());
     }
 
@@ -170,17 +175,32 @@ public class AbstractProcessorContextTest {
             equalTo("user-supplied-value")
         );
     }
+    @Test
+    public void shouldThrowErrorIfSerdeDefaultNotSet() {
+        final Properties config = getStreamsConfig();
+        config.put(StreamsConfig.ROCKSDB_CONFIG_SETTER_CLASS_CONFIG, RocksDBConfigSetter.class.getName());
+        config.put("user.supplied.config", "user-supplied-value");
+        final TestProcessorContext pc = new TestProcessorContext(metrics, config);
+        assertThrows(ConfigException.class, pc::keySerde);
+        assertThrows(ConfigException.class, pc::valueSerde);
+    }
 
-    private static class TestProcessorContext extends AbstractProcessorContext {
+    private static class TestProcessorContext extends AbstractProcessorContext<Object, Object> {
         static Properties config;
         static {
             config = getStreamsConfig();
             // Value must be a string to test className -> class conversion
             config.put(StreamsConfig.ROCKSDB_CONFIG_SETTER_CLASS_CONFIG, RocksDBConfigSetter.class.getName());
+            config.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.ByteArraySerde.class);
+            config.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.ByteArraySerde.class);
             config.put("user.supplied.config", "user-supplied-value");
         }
 
         TestProcessorContext(final MockStreamsMetrics metrics) {
+            super(new TaskId(0, 0), new StreamsConfig(config), metrics, new ThreadCache(new LogContext("name "), 0, metrics));
+        }
+
+        TestProcessorContext(final MockStreamsMetrics metrics, final Properties config) {
             super(new TaskId(0, 0), new StreamsConfig(config), metrics, new ThreadCache(new LogContext("name "), 0, metrics));
         }
 
@@ -191,14 +211,6 @@ public class AbstractProcessorContextTest {
 
         @Override
         public <S extends StateStore> S getStateStore(final String name) {
-            return null;
-        }
-
-        @Override
-        @Deprecated
-        public Cancellable schedule(final long interval,
-                                    final PunctuationType type,
-                                    final Punctuator callback) {
             return null;
         }
 
@@ -233,7 +245,8 @@ public class AbstractProcessorContextTest {
         public void logChange(final String storeName,
                               final Bytes key,
                               final byte[] value,
-                              final long timestamp) {
+                              final long timestamp,
+                              final Position position) {
         }
 
         @Override
@@ -250,7 +263,20 @@ public class AbstractProcessorContextTest {
 
         @Override
         public String changelogFor(final String storeName) {
-            return ProcessorStateManager.storeChangelogTopic(applicationId(), storeName);
+            return ProcessorStateManager.storeChangelogTopic(applicationId(), storeName, taskId().topologyName());
+        }
+
+        @Override
+        public <K, V> void forward(final FixedKeyRecord<K, V> record) {
+            forward(new Record<>(record.key(), record.value(), record.timestamp(), record.headers()));
+        }
+
+        @Override
+        public <K, V> void forward(final FixedKeyRecord<K, V> record, final String childName) {
+            forward(
+                new Record<>(record.key(), record.value(), record.timestamp(), record.headers()),
+                childName
+            );
         }
     }
 }

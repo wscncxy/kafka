@@ -18,11 +18,9 @@ package org.apache.kafka.common.requests;
 
 import org.apache.kafka.common.message.CreateDelegationTokenRequestData;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.protocol.Readable;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
-
-import java.nio.ByteBuffer;
 
 public class CreateDelegationTokenRequest extends AbstractRequest {
 
@@ -33,8 +31,8 @@ public class CreateDelegationTokenRequest extends AbstractRequest {
         this.data = data;
     }
 
-    public static CreateDelegationTokenRequest parse(ByteBuffer buffer, short version) {
-        return new CreateDelegationTokenRequest(new CreateDelegationTokenRequestData(new ByteBufferAccessor(buffer), version),
+    public static CreateDelegationTokenRequest parse(Readable readable, short version) {
+        return new CreateDelegationTokenRequest(new CreateDelegationTokenRequestData(readable, version),
             version);
     }
 
@@ -45,7 +43,8 @@ public class CreateDelegationTokenRequest extends AbstractRequest {
 
     @Override
     public AbstractResponse getErrorResponse(int throttleTimeMs, Throwable e) {
-        return CreateDelegationTokenResponse.prepareResponse(throttleTimeMs, Errors.forException(e), KafkaPrincipal.ANONYMOUS);
+        return CreateDelegationTokenResponse.prepareResponse(version(), throttleTimeMs, Errors.forException(e),
+            KafkaPrincipal.ANONYMOUS, KafkaPrincipal.ANONYMOUS);
     }
 
     public static class Builder extends AbstractRequest.Builder<CreateDelegationTokenRequest> {

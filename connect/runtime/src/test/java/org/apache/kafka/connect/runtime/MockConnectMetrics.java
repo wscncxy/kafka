@@ -41,7 +41,6 @@ import java.util.Map;
  * If the same metric is created a second time (e.g., a worker task is re-created), the new metric will replace
  * the previous metric in the custom reporter.
  */
-@SuppressWarnings("deprecation")
 public class MockConnectMetrics extends ConnectMetrics {
 
     private static final Map<String, String> DEFAULT_WORKER_CONFIG = new HashMap<>();
@@ -49,9 +48,8 @@ public class MockConnectMetrics extends ConnectMetrics {
     static {
         DEFAULT_WORKER_CONFIG.put(WorkerConfig.KEY_CONVERTER_CLASS_CONFIG, "org.apache.kafka.connect.json.JsonConverter");
         DEFAULT_WORKER_CONFIG.put(WorkerConfig.VALUE_CONVERTER_CLASS_CONFIG, "org.apache.kafka.connect.json.JsonConverter");
-        DEFAULT_WORKER_CONFIG.put(WorkerConfig.INTERNAL_KEY_CONVERTER_CLASS_CONFIG, "org.apache.kafka.connect.json.JsonConverter");
-        DEFAULT_WORKER_CONFIG.put(WorkerConfig.INTERNAL_VALUE_CONVERTER_CLASS_CONFIG, "org.apache.kafka.connect.json.JsonConverter");
         DEFAULT_WORKER_CONFIG.put(CommonClientConfigs.METRIC_REPORTER_CLASSES_CONFIG, MockMetricsReporter.class.getName());
+        DEFAULT_WORKER_CONFIG.put(WorkerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
     }
 
     public MockConnectMetrics() {
@@ -153,7 +151,7 @@ public class MockConnectMetrics extends ConnectMetrics {
     }
 
     public static class MockMetricsReporter implements MetricsReporter {
-        private Map<MetricName, KafkaMetric> metricsByName = new HashMap<>();
+        private final Map<MetricName, KafkaMetric> metricsByName = new HashMap<>();
 
         private MetricsContext metricsContext;
 

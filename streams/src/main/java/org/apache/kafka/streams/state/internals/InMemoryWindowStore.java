@@ -20,16 +20,26 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.kstream.internals.TimeWindow;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.processor.StateStoreContext;
+import org.apache.kafka.streams.processor.internals.ChangelogRecordDeserializationHelper;
+import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
 import org.apache.kafka.streams.processor.internals.ProcessorContextUtils;
+import org.apache.kafka.streams.processor.internals.RecordBatchingStateRestoreCallback;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
+import org.apache.kafka.streams.query.Position;
+import org.apache.kafka.streams.query.PositionBound;
+import org.apache.kafka.streams.query.Query;
+import org.apache.kafka.streams.query.QueryConfig;
+import org.apache.kafka.streams.query.QueryResult;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.WindowStore;
 import org.apache.kafka.streams.state.WindowStoreIterator;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +53,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 
+import static org.apache.kafka.streams.StreamsConfig.InternalConfig.IQ_CONSISTENCY_OFFSET_VECTOR_ENABLED;
 import static org.apache.kafka.streams.state.internals.WindowKeySchema.extractStoreKeyBytes;
 import static org.apache.kafka.streams.state.internals.WindowKeySchema.extractStoreTimestamp;
 
@@ -61,12 +72,14 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
     private final ConcurrentNavigableMap<Long, ConcurrentNavigableMap<Bytes, byte[]>> segmentMap = new ConcurrentSkipListMap<>();
     private final Set<InMemoryWindowStoreIteratorWrapper> openIterators = ConcurrentHashMap.newKeySet();
 
-    private ProcessorContext context;
+    private InternalProcessorContext<?, ?> internalProcessorContext;
     private Sensor expiredRecordSensor;
     private int seqnum = 0;
     private long observedStreamTime = ConsumerRecord.NO_TIMESTAMP;
 
     private volatile boolean open = false;
+
+    private final Position position;
 
     public InMemoryWindowStore(final String name,
                                final long retentionPeriod,
@@ -78,6 +91,7 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
         this.windowSize = windowSize;
         this.retainDuplicates = retainDuplicates;
         this.metricScope = metricScope;
+        this.position = Position.emptyPosition();
     }
 
     @Override
@@ -85,27 +99,52 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
         return name;
     }
 
-    @Deprecated
     @Override
-    public void init(final ProcessorContext context, final StateStore root) {
-        this.context = context;
+    public void init(final StateStoreContext stateStoreContext,
+                     final StateStore root) {
+        this.internalProcessorContext = ProcessorContextUtils.asInternalProcessorContext(stateStoreContext);
 
-        final StreamsMetricsImpl metrics = ProcessorContextUtils.getMetricsImpl(context);
+        final StreamsMetricsImpl metrics = ProcessorContextUtils.metricsImpl(stateStoreContext);
         final String threadId = Thread.currentThread().getName();
-        final String taskName = context.taskId().toString();
-        expiredRecordSensor = TaskMetrics.droppedRecordsSensorOrExpiredWindowRecordDropSensor(
+        final String taskName = stateStoreContext.taskId().toString();
+        expiredRecordSensor = TaskMetrics.droppedRecordsSensor(
             threadId,
             taskName,
-            metricScope,
-            name,
             metrics
         );
 
         if (root != null) {
-            context.register(root, (key, value) ->
-                put(Bytes.wrap(extractStoreKeyBytes(key)), value, extractStoreTimestamp(key)));
+            final boolean consistencyEnabled = StreamsConfig.InternalConfig.getBoolean(
+                stateStoreContext.appConfigs(),
+                IQ_CONSISTENCY_OFFSET_VECTOR_ENABLED,
+                false
+            );
+            stateStoreContext.register(
+                root,
+                (RecordBatchingStateRestoreCallback) records -> {
+                    synchronized (position) {
+                        for (final ConsumerRecord<byte[], byte[]> record : records) {
+                            put(
+                                Bytes.wrap(extractStoreKeyBytes(record.key())),
+                                record.value(),
+                                extractStoreTimestamp(record.key())
+                            );
+                            ChangelogRecordDeserializationHelper.applyChecksAndUpdatePosition(
+                                record,
+                                consistencyEnabled,
+                                position
+                            );
+                        }
+                    }
+                }
+            );
         }
         open = true;
+    }
+
+    @Override
+    public Position getPosition() {
+        return position;
     }
 
     @Override
@@ -113,25 +152,29 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
         removeExpiredSegments();
         observedStreamTime = Math.max(observedStreamTime, windowStartTimestamp);
 
-        if (windowStartTimestamp <= observedStreamTime - retentionPeriod) {
-            expiredRecordSensor.record(1.0d, ProcessorContextUtils.currentSystemTime(context));
-            LOG.warn("Skipping record for expired segment.");
-        } else {
-            if (value != null) {
-                maybeUpdateSeqnumForDups();
-                final Bytes keyBytes = retainDuplicates ? wrapForDups(key, seqnum) : key;
-                segmentMap.computeIfAbsent(windowStartTimestamp, t -> new ConcurrentSkipListMap<>());
-                segmentMap.get(windowStartTimestamp).put(keyBytes, value);
-            } else if (!retainDuplicates) {
-                // Skip if value is null and duplicates are allowed since this delete is a no-op
-                segmentMap.computeIfPresent(windowStartTimestamp, (t, kvMap) -> {
-                    kvMap.remove(key);
-                    if (kvMap.isEmpty()) {
-                        segmentMap.remove(windowStartTimestamp);
-                    }
-                    return kvMap;
-                });
+        synchronized (position) {
+            if (windowStartTimestamp <= observedStreamTime - retentionPeriod) {
+                expiredRecordSensor.record(1.0d, internalProcessorContext.currentSystemTimeMs());
+                LOG.warn("Skipping record for expired segment.");
+            } else {
+                if (value != null) {
+                    maybeUpdateSeqnumForDups();
+                    final Bytes keyBytes = retainDuplicates ? wrapForDups(key, seqnum) : key;
+                    segmentMap.computeIfAbsent(windowStartTimestamp, t -> new ConcurrentSkipListMap<>());
+                    segmentMap.get(windowStartTimestamp).put(keyBytes, value);
+                } else if (!retainDuplicates) {
+                    // Skip if value is null and duplicates are allowed since this delete is a no-op
+                    segmentMap.computeIfPresent(windowStartTimestamp, (t, kvMap) -> {
+                        kvMap.remove(key);
+                        if (kvMap.isEmpty()) {
+                            segmentMap.remove(windowStartTimestamp);
+                        }
+                        return kvMap;
+                    });
+                }
             }
+
+            StoreQueryUtils.updatePosition(position, internalProcessorContext);
         }
     }
 
@@ -153,7 +196,6 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
         }
     }
 
-    @Deprecated
     @Override
     public WindowStoreIterator<byte[]> fetch(final Bytes key, final long timeFrom, final long timeTo) {
         return fetch(key, timeFrom, timeTo, true);
@@ -193,7 +235,6 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
         }
     }
 
-    @Deprecated
     @Override
     public KeyValueIterator<Windowed<Bytes>, byte[]> fetch(final Bytes keyFrom,
                                                            final Bytes keyTo,
@@ -215,12 +256,9 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
                                                     final long timeFrom,
                                                     final long timeTo,
                                                     final boolean forward) {
-        Objects.requireNonNull(from, "from key cannot be null");
-        Objects.requireNonNull(to, "to key cannot be null");
-
         removeExpiredSegments();
 
-        if (from.compareTo(to) > 0) {
+        if (from != null && to != null && from.compareTo(to) > 0) {
             LOG.warn("Returning empty iterator for fetch with invalid key range: from > to. " +
                 "This may be due to range arguments set in the wrong order, " +
                 "or serdes that don't preserve ordering when lexicographically comparing the serialized bytes. " +
@@ -254,7 +292,6 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
         }
     }
 
-    @Deprecated
     @Override
     public KeyValueIterator<Windowed<Bytes>, byte[]> fetchAll(final long timeFrom, final long timeTo) {
         return fetchAll(timeFrom, timeTo, true);
@@ -333,6 +370,21 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
     }
 
     @Override
+    public <R> QueryResult<R> query(final Query<R> query,
+                                    final PositionBound positionBound,
+                                    final QueryConfig config) {
+
+        return StoreQueryUtils.handleBasicQueries(
+            query,
+            positionBound,
+            config,
+            this,
+            position,
+            internalProcessorContext
+        );
+    }
+
+    @Override
     public void flush() {
         // do-nothing since it is in-memory
     }
@@ -399,7 +451,8 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
         final Bytes to = (retainDuplicates && keyTo != null) ? wrapForDups(keyTo, Integer.MAX_VALUE) : keyTo;
 
         final WrappedWindowedKeyValueIterator iterator =
-            new WrappedWindowedKeyValueIterator(from,
+            new WrappedWindowedKeyValueIterator(
+                from,
                 to,
                 segmentIterator,
                 openIterators::remove,
@@ -415,7 +468,7 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
         void deregisterIterator(final InMemoryWindowStoreIteratorWrapper iterator);
     }
 
-    private static abstract class InMemoryWindowStoreIteratorWrapper {
+    private abstract static class InMemoryWindowStoreIteratorWrapper {
 
         private Iterator<Map.Entry<Bytes, byte[]>> recordIterator;
         private KeyValue<Bytes, byte[]> next;
@@ -464,11 +517,28 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
             }
 
             final Bytes key = getKey(next.key);
-            if (key.compareTo(getKey(keyFrom)) >= 0 && key.compareTo(getKey(keyTo)) <= 0) {
+            if (isKeyWithinRange(key)) {
                 return true;
             } else {
                 next = null;
                 return hasNext();
+            }
+        }
+
+        private boolean isKeyWithinRange(final Bytes key) {
+            // split all cases for readability and avoid BooleanExpressionComplexity checkstyle warning
+            if (keyFrom == null && keyTo == null) {
+                // fetch all
+                return true;
+            } else if (keyFrom == null) {
+                // start from the beginning
+                return key.compareTo(getKey(keyTo)) <= 0;
+            } else if (keyTo == null) {
+                // end to the last
+                return key.compareTo(getKey(keyFrom)) >= 0;
+            } else {
+                // key is within the range
+                return key.compareTo(getKey(keyFrom)) >= 0 && key.compareTo(getKey(keyTo)) <= 0;
             }
         }
 
@@ -501,10 +571,21 @@ public class InMemoryWindowStore implements WindowStore<Bytes, byte[]> {
             final Map.Entry<Long, ConcurrentNavigableMap<Bytes, byte[]>> currentSegment = segmentIterator.next();
             currentTime = currentSegment.getKey();
 
-            if (allKeys) {
-                return currentSegment.getValue().entrySet().iterator();
+            final ConcurrentNavigableMap<Bytes, byte[]> subMap;
+            if (allKeys) { // keyFrom == null && keyTo == null
+                subMap = currentSegment.getValue();
+            } else if (keyFrom == null) {
+                subMap = currentSegment.getValue().headMap(keyTo, true);
+            } else if (keyTo == null) {
+                subMap = currentSegment.getValue().tailMap(keyFrom, true);
             } else {
-                return currentSegment.getValue().subMap(keyFrom, true, keyTo, true).entrySet().iterator();
+                subMap = currentSegment.getValue().subMap(keyFrom, true, keyTo, true);
+            }
+
+            if (forward) {
+                return subMap.entrySet().iterator();
+            } else {
+                return subMap.descendingMap().entrySet().iterator();
             }
         }
 

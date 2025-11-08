@@ -33,12 +33,9 @@ class RoundTripFaultTest(Test):
     def __init__(self, test_context):
         """:type test_context: ducktape.tests.test.TestContext"""
         super(RoundTripFaultTest, self).__init__(test_context)
-        self.zk = ZookeeperService(test_context, num_nodes=3) if quorum.for_test(test_context) == quorum.zk else None
-        self.kafka = KafkaService(test_context, num_nodes=4, zk=self.zk)
+        self.kafka = KafkaService(test_context, num_nodes=4, zk=None)
         self.workload_service = RoundTripWorkloadService(test_context, self.kafka)
-        if quorum.for_test(test_context) == quorum.zk:
-            trogdor_client_services = [self.zk, self.kafka, self.workload_service]
-        elif quorum.for_test(test_context) == quorum.remote_raft:
+        if quorum.for_test(test_context) == quorum.isolated_kraft:
             trogdor_client_services = [self.kafka.controller_quorum, self.kafka, self.workload_service]
         else: #co-located case, which we currently don't test but handle here for completeness in case we do test it
             trogdor_client_services = [self.kafka, self.workload_service]
@@ -46,7 +43,8 @@ class RoundTripFaultTest(Test):
                                       client_services=trogdor_client_services)
         topic_name = "round_trip_topic%d" % RoundTripFaultTest.topic_name_index
         RoundTripFaultTest.topic_name_index = RoundTripFaultTest.topic_name_index + 1
-        active_topics={topic_name : {"partitionAssignments":{"0": [0,1,2]}}}
+        # note that the broker.id values will be 1..num_nodes
+        active_topics={topic_name : {"partitionAssignments":{"0": [1,2,3]}}}
         self.round_trip_spec = RoundTripWorkloadSpec(0, TaskSpec.MAX_DURATION_MS,
                                      self.workload_service.client_node,
                                      self.workload_service.bootstrap_servers,
@@ -55,32 +53,28 @@ class RoundTripFaultTest(Test):
                                      active_topics=active_topics)
 
     def setUp(self):
-        if self.zk:
-            self.zk.start()
         self.kafka.start()
         self.trogdor.start()
 
     def teardown(self):
         self.trogdor.stop()
         self.kafka.stop()
-        if self.zk:
-            self.zk.stop()
 
     def remote_quorum_nodes(self):
-        if quorum.for_test(self.test_context) == quorum.zk:
-            return self.zk.nodes
-        elif quorum.for_test(self.test_context) == quorum.remote_raft:
+        if quorum.for_test(self.test_context) == quorum.isolated_kraft:
             return self.kafka.controller_quorum.nodes
         else: # co-located case, which we currently don't test but handle here for completeness in case we do test it
             return []
 
     @cluster(num_nodes=9)
-    def test_round_trip_workload(self, metadata_quorum=quorum.zk):
+    @matrix(metadata_quorum=quorum.all_non_upgrade)
+    def test_round_trip_workload(self, metadata_quorum):
         workload1 = self.trogdor.create_task("workload1", self.round_trip_spec)
         workload1.wait_for_done(timeout_sec=600)
 
     @cluster(num_nodes=9)
-    def test_round_trip_workload_with_broker_partition(self, metadata_quorum=quorum.zk):
+    @matrix(metadata_quorum=quorum.all_non_upgrade)
+    def test_round_trip_workload_with_broker_partition(self, metadata_quorum):
         workload1 = self.trogdor.create_task("workload1", self.round_trip_spec)
         time.sleep(2)
         part1 = [self.kafka.nodes[0]]
@@ -93,7 +87,8 @@ class RoundTripFaultTest(Test):
         partition1.wait_for_done()
 
     @cluster(num_nodes=9)
-    def test_produce_consume_with_broker_pause(self, metadata_quorum=quorum.zk):
+    @matrix(metadata_quorum=quorum.all_non_upgrade)
+    def test_produce_consume_with_broker_pause(self, metadata_quorum):
         workload1 = self.trogdor.create_task("workload1", self.round_trip_spec)
         time.sleep(2)
         stop1_spec = ProcessStopFaultSpec(0, TaskSpec.MAX_DURATION_MS, [self.kafka.nodes[0]],
@@ -105,7 +100,8 @@ class RoundTripFaultTest(Test):
         self.kafka.stop_node(self.kafka.nodes[0], False)
 
     @cluster(num_nodes=9)
-    def test_produce_consume_with_client_partition(self, metadata_quorum=quorum.zk):
+    @matrix(metadata_quorum=quorum.all_non_upgrade)
+    def test_produce_consume_with_client_partition(self, metadata_quorum):
         workload1 = self.trogdor.create_task("workload1", self.round_trip_spec)
         time.sleep(2)
         part1 = [self.workload_service.nodes[0]]
@@ -117,7 +113,8 @@ class RoundTripFaultTest(Test):
         stop1.wait_for_done()
 
     @cluster(num_nodes=9)
-    def test_produce_consume_with_latency(self, metadata_quorum=quorum.zk):
+    @matrix(metadata_quorum=quorum.all_non_upgrade)
+    def test_produce_consume_with_latency(self, metadata_quorum):
         workload1 = self.trogdor.create_task("workload1", self.round_trip_spec)
         time.sleep(2)
         spec = DegradedNetworkFaultSpec(0, 60000)

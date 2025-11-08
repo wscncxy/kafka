@@ -17,26 +17,21 @@
 package org.apache.kafka.streams.scala.kstream
 
 import java.time.Duration.ofSeconds
-import java.time.Instant
-
-import org.apache.kafka.streams.KeyValue
-import org.apache.kafka.streams.kstream.{
-  JoinWindows,
-  Named,
-  Transformer,
-  ValueTransformer,
-  ValueTransformerSupplier,
-  ValueTransformerWithKey,
-  ValueTransformerWithKeySupplier
-}
-import org.apache.kafka.streams.processor.ProcessorContext
+import java.time.{Duration, Instant}
+import org.apache.kafka.streams.kstream.{JoinWindows, Named}
+import org.apache.kafka.streams.processor.api
+import org.apache.kafka.streams.processor.api.{FixedKeyRecord, Processor, ProcessorSupplier}
 import org.apache.kafka.streams.scala.ImplicitConversions._
 import org.apache.kafka.streams.scala.serialization.Serdes._
 import org.apache.kafka.streams.scala.StreamsBuilder
+import org.apache.kafka.streams.scala.serialization.Serdes
 import org.apache.kafka.streams.scala.utils.TestDriver
+import org.apache.kafka.streams.state.{KeyValueStore, StoreBuilder, Stores}
 import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.api.Test
 
+import java.util
+import java.util.Collections
 import scala.jdk.CollectionConverters._
 
 class KStreamTest extends TestDriver {
@@ -191,6 +186,7 @@ class KStreamTest extends TestDriver {
     testDriver.close()
   }
 
+  // noinspection ScalaDeprecation
   @Test
   def testJoinCorrectlyRecords(): Unit = {
     val builder = new StreamsBuilder()
@@ -200,7 +196,9 @@ class KStreamTest extends TestDriver {
 
     val stream1 = builder.stream[String, String](sourceTopic1)
     val stream2 = builder.stream[String, String](sourceTopic2)
-    stream1.join(stream2)((a, b) => s"$a-$b", JoinWindows.of(ofSeconds(1))).to(sinkTopic)
+    stream1
+      .join(stream2)((a, b) => s"$a-$b", JoinWindows.ofTimeDifferenceAndGrace(ofSeconds(1), Duration.ofHours(24)))
+      .to(sinkTopic)
 
     val now = Instant.now()
 
@@ -220,22 +218,48 @@ class KStreamTest extends TestDriver {
   }
 
   @Test
-  def testTransformCorrectlyRecords(): Unit = {
-    class TestTransformer extends Transformer[String, String, KeyValue[String, String]] {
-      override def init(context: ProcessorContext): Unit = {}
+  def testProcessCorrectlyRecords(): Unit = {
+    val processorSupplier: ProcessorSupplier[String, String, String, String] =
+      new api.ProcessorSupplier[String, String, String, String] {
+        private val storeName = "store-name"
 
-      override def transform(key: String, value: String): KeyValue[String, String] =
-        new KeyValue(s"$key-transformed", s"$value-transformed")
+        override def stores: util.Set[StoreBuilder[_]] = {
+          val keyValueStoreBuilder = Stores.keyValueStoreBuilder(
+            Stores.persistentKeyValueStore(storeName),
+            Serdes.stringSerde,
+            Serdes.stringSerde
+          )
+          Collections.singleton(keyValueStoreBuilder)
+        }
 
-      override def close(): Unit = {}
-    }
+        override def get(): Processor[String, String, String, String] =
+          new api.Processor[String, String, String, String] {
+            private var context: api.ProcessorContext[String, String] = _
+            private var store: KeyValueStore[String, String] = _
+
+            override def init(context: api.ProcessorContext[String, String]): Unit = {
+              this.context = context
+              store = context.getStateStore(storeName)
+            }
+
+            override def process(record: api.Record[String, String]): Unit = {
+              val key = record.key()
+              val value = record.value()
+              val processedKey = s"$key-processed"
+              val processedValue = s"$value-processed"
+              store.put(processedKey, processedValue)
+              context.forward(new api.Record(processedKey, processedValue, record.timestamp()))
+            }
+          }
+      }
+
     val builder = new StreamsBuilder()
     val sourceTopic = "source"
     val sinkTopic = "sink"
 
     val stream = builder.stream[String, String](sourceTopic)
     stream
-      .transform(() => new TestTransformer)
+      .process(processorSupplier)
       .to(sinkTopic)
 
     val now = Instant.now()
@@ -246,8 +270,8 @@ class KStreamTest extends TestDriver {
     testInput.pipeInput("1", "value", now)
 
     val result = testOutput.readKeyValue()
-    assertEquals("value-transformed", result.value)
-    assertEquals("1-transformed", result.key)
+    assertEquals("value-processed", result.value)
+    assertEquals("1-processed", result.key)
 
     assertTrue(testOutput.isEmpty)
 
@@ -255,22 +279,28 @@ class KStreamTest extends TestDriver {
   }
 
   @Test
-  def testFlatTransformCorrectlyRecords(): Unit = {
-    class TestTransformer extends Transformer[String, String, Iterable[KeyValue[String, String]]] {
-      override def init(context: ProcessorContext): Unit = {}
+  def testProcessValuesCorrectlyRecords(): Unit = {
+    val processorSupplier: api.FixedKeyProcessorSupplier[String, String, String] =
+      () =>
+        new api.FixedKeyProcessor[String, String, String] {
+          private var context: api.FixedKeyProcessorContext[String, String] = _
 
-      override def transform(key: String, value: String): Iterable[KeyValue[String, String]] =
-        Array(new KeyValue(s"$key-transformed", s"$value-transformed"))
+          override def init(context: api.FixedKeyProcessorContext[String, String]): Unit =
+            this.context = context
 
-      override def close(): Unit = {}
-    }
+          override def process(record: FixedKeyRecord[String, String]): Unit = {
+            val processedValue = s"${record.value()}-processed"
+            context.forward(record.withValue(processedValue))
+          }
+        }
+
     val builder = new StreamsBuilder()
     val sourceTopic = "source"
     val sinkTopic = "sink"
 
     val stream = builder.stream[String, String](sourceTopic)
     stream
-      .flatTransform(() => new TestTransformer)
+      .processValues(processorSupplier)
       .to(sinkTopic)
 
     val now = Instant.now()
@@ -281,80 +311,8 @@ class KStreamTest extends TestDriver {
     testInput.pipeInput("1", "value", now)
 
     val result = testOutput.readKeyValue()
-    assertEquals("value-transformed", result.value)
-    assertEquals("1-transformed", result.key)
-
-    assertTrue(testOutput.isEmpty)
-
-    testDriver.close()
-  }
-
-  @Test
-  def testCorrectlyFlatTransformValuesInRecords(): Unit = {
-    class TestTransformer extends ValueTransformer[String, Iterable[String]] {
-      override def init(context: ProcessorContext): Unit = {}
-
-      override def transform(value: String): Iterable[String] =
-        Array(s"$value-transformed")
-
-      override def close(): Unit = {}
-    }
-    val builder = new StreamsBuilder()
-    val sourceTopic = "source"
-    val sinkTopic = "sink"
-
-    val stream = builder.stream[String, String](sourceTopic)
-    stream
-      .flatTransformValues(new ValueTransformerSupplier[String, Iterable[String]] {
-        def get(): ValueTransformer[String, Iterable[String]] =
-          new TestTransformer
-      })
-      .to(sinkTopic)
-
-    val now = Instant.now()
-    val testDriver = createTestDriver(builder, now)
-    val testInput = testDriver.createInput[String, String](sourceTopic)
-    val testOutput = testDriver.createOutput[String, String](sinkTopic)
-
-    testInput.pipeInput("1", "value", now)
-
-    assertEquals("value-transformed", testOutput.readValue)
-
-    assertTrue(testOutput.isEmpty)
-
-    testDriver.close()
-  }
-
-  @Test
-  def testCorrectlyFlatTransformValuesInRecordsWithKey(): Unit = {
-    class TestTransformer extends ValueTransformerWithKey[String, String, Iterable[String]] {
-      override def init(context: ProcessorContext): Unit = {}
-
-      override def transform(key: String, value: String): Iterable[String] =
-        Array(s"$value-transformed-$key")
-
-      override def close(): Unit = {}
-    }
-    val builder = new StreamsBuilder()
-    val sourceTopic = "source"
-    val sinkTopic = "sink"
-
-    val stream = builder.stream[String, String](sourceTopic)
-    stream
-      .flatTransformValues(new ValueTransformerWithKeySupplier[String, String, Iterable[String]] {
-        def get(): ValueTransformerWithKey[String, String, Iterable[String]] =
-          new TestTransformer
-      })
-      .to(sinkTopic)
-
-    val now = Instant.now()
-    val testDriver = createTestDriver(builder, now)
-    val testInput = testDriver.createInput[String, String](sourceTopic)
-    val testOutput = testDriver.createOutput[String, String](sinkTopic)
-
-    testInput.pipeInput("1", "value", now)
-
-    assertEquals("value-transformed-1", testOutput.readValue)
+    assertEquals("value-processed", result.value)
+    assertEquals("1", result.key)
 
     assertTrue(testOutput.isEmpty)
 
@@ -442,14 +400,9 @@ class KStreamTest extends TestDriver {
   }
 
   @Test
-  def testSettingNameOnTransform(): Unit = {
-    class TestTransformer extends Transformer[String, String, KeyValue[String, String]] {
-      override def init(context: ProcessorContext): Unit = {}
-
-      override def transform(key: String, value: String): KeyValue[String, String] =
-        new KeyValue(s"$key-transformed", s"$value-transformed")
-
-      override def close(): Unit = {}
+  def testSettingNameOnProcess(): Unit = {
+    class TestProcessor extends api.Processor[String, String, String, String] {
+      override def process(record: api.Record[String, String]): Unit = {}
     }
     val builder = new StreamsBuilder()
     val sourceTopic = "source"
@@ -457,7 +410,7 @@ class KStreamTest extends TestDriver {
 
     val stream = builder.stream[String, String](sourceTopic)
     stream
-      .transform(() => new TestTransformer, Named.as("my-name"))
+      .process(() => new TestProcessor, Named.as("my-name"))
       .to(sinkTopic)
 
     val transformNode = builder.build().describe().subtopologies().asScala.head.nodes().asScala.toList(1)

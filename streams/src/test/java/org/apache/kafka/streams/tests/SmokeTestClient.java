@@ -19,7 +19,6 @@ package org.apache.kafka.streams.tests;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.KafkaThread;
-import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
@@ -38,15 +37,14 @@ import org.apache.kafka.streams.kstream.TimeWindows;
 import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.state.Stores;
 import org.apache.kafka.streams.state.WindowStore;
+import org.apache.kafka.test.TestUtils;
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Files;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.apache.kafka.streams.kstream.Suppressed.untilWindowCloses;
 
@@ -57,6 +55,8 @@ public class SmokeTestClient extends SmokeTestUtil {
     private KafkaStreams streams;
     private boolean uncaughtException = false;
     private volatile boolean closed;
+    private volatile boolean error;
+    private final AtomicInteger totalDataRecordsProcessed = new AtomicInteger(0);
 
     private static void addShutdownHook(final String name, final Runnable runnable) {
         if (name != null) {
@@ -66,34 +66,20 @@ public class SmokeTestClient extends SmokeTestUtil {
         }
     }
 
-    private static File tempDirectory() {
-        final String prefix = "kafka-";
-        final File file;
-        try {
-            file = Files.createTempDirectory(prefix).toFile();
-        } catch (final IOException ex) {
-            throw new RuntimeException("Failed to create a temp dir", ex);
-        }
-        file.deleteOnExit();
-
-        addShutdownHook("delete-temp-file-shutdown-hook", () -> {
-            try {
-                Utils.delete(file);
-            } catch (final IOException e) {
-                System.out.println("Error deleting " + file.getAbsolutePath());
-                e.printStackTrace(System.out);
-            }
-        });
-
-        return file;
-    }
-
     public SmokeTestClient(final String name) {
         this.name = name;
     }
 
     public boolean closed() {
         return closed;
+    }
+
+    public boolean error() {
+        return error;
+    }
+
+    public int totalDataRecordsProcessed() {
+        return totalDataRecordsProcessed.get();
     }
 
     public void start(final Properties streamsProperties) {
@@ -109,6 +95,10 @@ public class SmokeTestClient extends SmokeTestUtil {
 
             if (newState == KafkaStreams.State.NOT_RUNNING) {
                 closed = true;
+            }
+
+            if (newState == KafkaStreams.State.ERROR) {
+                error = true;
             }
         });
 
@@ -126,13 +116,14 @@ public class SmokeTestClient extends SmokeTestUtil {
         try {
             if (!countDownLatch.await(1, TimeUnit.MINUTES)) {
                 System.out.println(name + ": SMOKE-TEST-CLIENT-EXCEPTION: Didn't start in one minute");
+            } else {
+                System.out.println(name + ": SMOKE-TEST-CLIENT-STARTED");
+                System.out.println(name + " started at " + Instant.now());
             }
         } catch (final InterruptedException e) {
             System.out.println(name + ": SMOKE-TEST-CLIENT-EXCEPTION: " + e);
             e.printStackTrace(System.out);
         }
-        System.out.println(name + ": SMOKE-TEST-CLIENT-STARTED");
-        System.out.println(name + " started at " + Instant.now());
     }
 
     public void closeAsync() {
@@ -145,7 +136,7 @@ public class SmokeTestClient extends SmokeTestUtil {
         if (wasClosed && !uncaughtException) {
             System.out.println(name + ": SMOKE-TEST-CLIENT-CLOSED");
         } else if (wasClosed) {
-            System.out.println(name + ": SMOKE-TEST-CLIENT-EXCEPTION");
+            System.out.println(name + ": SMOKE-TEST-CLIENT-EXCEPTION: Got an uncaught exception");
         } else {
             System.out.println(name + ": SMOKE-TEST-CLIENT-EXCEPTION: Didn't close in time.");
         }
@@ -153,9 +144,13 @@ public class SmokeTestClient extends SmokeTestUtil {
 
     private Properties getStreamsConfig(final Properties props) {
         final Properties fullProps = new Properties(props);
-        fullProps.put(StreamsConfig.APPLICATION_ID_CONFIG, "SmokeTest");
+        if (!props.containsKey(StreamsConfig.APPLICATION_ID_CONFIG)) {
+            fullProps.put(StreamsConfig.APPLICATION_ID_CONFIG, "SmokeTest");
+        }
         fullProps.put(StreamsConfig.CLIENT_ID_CONFIG, "SmokeTest-" + name);
-        fullProps.put(StreamsConfig.STATE_DIR_CONFIG, tempDirectory().getAbsolutePath());
+        fullProps.put(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory().getAbsolutePath());
+        fullProps.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2);
+        fullProps.put(StreamsConfig.WINDOW_STORE_CHANGE_LOG_ADDITIONAL_RETENTION_MS_CONFIG, Duration.ofDays(3).toMillis());
         fullProps.putAll(props);
         return fullProps;
     }
@@ -167,13 +162,13 @@ public class SmokeTestClient extends SmokeTestUtil {
         source.filterNot((k, v) -> k.equals("flush"))
               .to("echo", Produced.with(stringSerde, intSerde));
         final KStream<String, Integer> data = source.filter((key, value) -> value == null || value != END);
-        data.process(SmokeTestUtil.printProcessorSupplier("data", name));
+        data.process(SmokeTestUtil.printProcessorSupplier("data", name, totalDataRecordsProcessed));
 
         // min
         final KGroupedStream<String, Integer> groupedData = data.groupByKey(Grouped.with(stringSerde, intSerde));
 
         final KTable<Windowed<String>, Integer> minAggregation = groupedData
-            .windowedBy(TimeWindows.of(Duration.ofDays(1)).grace(Duration.ofMinutes(1)))
+            .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofDays(1), Duration.ofMinutes(1)))
             .aggregate(
                 () -> Integer.MAX_VALUE,
                 (aggKey, value, aggregate) -> (value < aggregate) ? value : aggregate,
@@ -193,8 +188,8 @@ public class SmokeTestClient extends SmokeTestUtil {
             .to("min", Produced.with(stringSerde, intSerde));
 
         final KTable<Windowed<String>, Integer> smallWindowSum = groupedData
-            .windowedBy(TimeWindows.of(Duration.ofSeconds(2)).advanceBy(Duration.ofSeconds(1)).grace(Duration.ofSeconds(30)))
-            .reduce((l, r) -> l + r);
+            .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofSeconds(2), Duration.ofSeconds(30)).advanceBy(Duration.ofSeconds(1)))
+            .reduce(Integer::sum);
 
         streamify(smallWindowSum, "sws-raw");
         streamify(smallWindowSum.suppress(untilWindowCloses(BufferConfig.unbounded())), "sws-suppressed");
@@ -208,7 +203,7 @@ public class SmokeTestClient extends SmokeTestUtil {
 
         // max
         groupedData
-            .windowedBy(TimeWindows.of(Duration.ofDays(2)))
+            .windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofDays(2)))
             .aggregate(
                 () -> Integer.MIN_VALUE,
                 (aggKey, value, aggregate) -> (value > aggregate) ? value : aggregate,
@@ -225,7 +220,7 @@ public class SmokeTestClient extends SmokeTestUtil {
 
         // sum
         groupedData
-            .windowedBy(TimeWindows.of(Duration.ofDays(2)))
+            .windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofDays(2)))
             .aggregate(
                 () -> 0L,
                 (aggKey, value, aggregate) -> (long) value + aggregate,
@@ -240,7 +235,7 @@ public class SmokeTestClient extends SmokeTestUtil {
 
         // cnt
         groupedData
-            .windowedBy(TimeWindows.of(Duration.ofDays(2)))
+            .windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofDays(2)))
             .count(Materialized.as("uwin-cnt"))
             .toStream(new Unwindow<>())
             .filterNot((k, v) -> k.equals("flush"))

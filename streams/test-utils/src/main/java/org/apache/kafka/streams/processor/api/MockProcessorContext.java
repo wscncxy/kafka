@@ -25,9 +25,8 @@ import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.StreamsMetrics;
 import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.TopologyTestDriver;
-import org.apache.kafka.streams.kstream.Transformer;
-import org.apache.kafka.streams.kstream.ValueTransformer;
 import org.apache.kafka.streams.processor.Cancellable;
+import org.apache.kafka.streams.processor.CommitCallback;
 import org.apache.kafka.streams.processor.PunctuationType;
 import org.apache.kafka.streams.processor.Punctuator;
 import org.apache.kafka.streams.processor.StateRestoreCallback;
@@ -55,8 +54,8 @@ import static org.apache.kafka.common.utils.Utils.mkMap;
 import static org.apache.kafka.common.utils.Utils.mkProperties;
 
 /**
- * {@link MockProcessorContext} is a mock of {@link ProcessorContext} for users to test their {@link Processor},
- * {@link Transformer}, and {@link ValueTransformer} implementations.
+ * {@link MockProcessorContext} is a mock of {@link ProcessorContext} for users to test their {@link Processor}
+ * implementations.
  * <p>
  * The tests for this class (org.apache.kafka.streams.MockProcessorContextTest) include several behavioral
  * tests that serve as example usage.
@@ -75,6 +74,8 @@ public class MockProcessorContext<KForward, VForward> implements ProcessorContex
 
     // settable record metadata ================================================
     private MockRecordMetadata recordMetadata;
+    private Long currentSystemTimeMs;
+    private Long currentStreamTimeMs;
 
     // mocks ================================================
     private final Map<String, StateStore> stateStores = new HashMap<>();
@@ -213,7 +214,7 @@ public class MockProcessorContext<KForward, VForward> implements ProcessorContex
         this(
             mkProperties(mkMap(
                 mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, ""),
-                mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "")
+                mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "dummy-bootstrap-host:0")
             )),
             new TaskId(0, 0),
             null
@@ -254,10 +255,11 @@ public class MockProcessorContext<KForward, VForward> implements ProcessorContex
         metrics = new StreamsMetricsImpl(
             new Metrics(metricConfig),
             threadId,
-            streamsConfig.getString(StreamsConfig.BUILT_IN_METRICS_VERSION_CONFIG),
+            "processId",
+            "applicationId",
             Time.SYSTEM
         );
-        TaskMetrics.droppedRecordsSensorOrSkippedRecordsSensor(threadId, taskId.toString(), metrics);
+        TaskMetrics.droppedRecordsSensor(threadId, taskId.toString(), metrics);
     }
 
     @Override
@@ -281,6 +283,22 @@ public class MockProcessorContext<KForward, VForward> implements ProcessorContex
     @Override
     public Map<String, Object> appConfigsWithPrefix(final String prefix) {
         return config.originalsWithPrefix(prefix);
+    }
+
+    @Override
+    public long currentSystemTimeMs() {
+        if (currentSystemTimeMs == null) {
+            throw new IllegalStateException("System time must be set before use via setCurrentSystemTimeMs().");
+        }
+        return currentSystemTimeMs;
+    }
+
+    @Override
+    public long currentStreamTimeMs() {
+        if (currentStreamTimeMs == null) {
+            throw new IllegalStateException("Stream time must be set before use via setCurrentStreamTimeMs().");
+        }
+        return currentStreamTimeMs;
     }
 
     @Override
@@ -323,6 +341,14 @@ public class MockProcessorContext<KForward, VForward> implements ProcessorContex
                                   final int partition,
                                   final long offset) {
         recordMetadata = new MockRecordMetadata(topic, partition, offset);
+    }
+
+    public void setCurrentSystemTimeMs(final long currentSystemTimeMs) {
+        this.currentSystemTimeMs = currentSystemTimeMs;
+    }
+
+    public void setCurrentStreamTimeMs(final long currentStreamTimeMs) {
+        this.currentStreamTimeMs = currentStreamTimeMs;
     }
 
     @Override
@@ -394,7 +420,7 @@ public class MockProcessorContext<KForward, VForward> implements ProcessorContex
     public List<CapturedForward<? extends KForward, ? extends VForward>> forwarded(final String childName) {
         final LinkedList<CapturedForward<? extends KForward, ? extends VForward>> result = new LinkedList<>();
         for (final CapturedForward<? extends KForward, ? extends VForward> capture : capturedForwards) {
-            if (!capture.childName().isPresent() || capture.childName().equals(Optional.of(childName))) {
+            if (capture.childName().isEmpty() || capture.childName().equals(Optional.of(childName))) {
                 result.add(capture);
             }
         }
@@ -460,6 +486,11 @@ public class MockProcessorContext<KForward, VForward> implements ProcessorContex
             }
 
             @Override
+            public Optional<RecordMetadata> recordMetadata() {
+                return MockProcessorContext.this.recordMetadata();
+            }
+
+            @Override
             public Serde<?> keySerde() {
                 return MockProcessorContext.this.keySerde();
             }
@@ -480,7 +511,15 @@ public class MockProcessorContext<KForward, VForward> implements ProcessorContex
             }
 
             @Override
-            public void register(final StateStore store, final StateRestoreCallback stateRestoreCallback) {
+            public void register(final StateStore store,
+                                 final StateRestoreCallback stateRestoreCallback) {
+                register(store, stateRestoreCallback, () -> { });
+            }
+
+            @Override
+            public void register(final StateStore store,
+                                 final StateRestoreCallback stateRestoreCallback,
+                                 final CommitCallback checkpoint) {
                 stateStores.put(store.name(), store);
             }
 

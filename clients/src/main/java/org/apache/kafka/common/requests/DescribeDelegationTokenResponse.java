@@ -20,13 +20,12 @@ import org.apache.kafka.common.message.DescribeDelegationTokenResponseData;
 import org.apache.kafka.common.message.DescribeDelegationTokenResponseData.DescribedDelegationToken;
 import org.apache.kafka.common.message.DescribeDelegationTokenResponseData.DescribedDelegationTokenRenewer;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.protocol.Readable;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.common.security.token.delegation.DelegationToken;
 import org.apache.kafka.common.security.token.delegation.TokenInformation;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -36,22 +35,29 @@ public class DescribeDelegationTokenResponse extends AbstractResponse {
 
     private final DescribeDelegationTokenResponseData data;
 
-    public DescribeDelegationTokenResponse(int throttleTimeMs, Errors error, List<DelegationToken> tokens) {
+    public DescribeDelegationTokenResponse(int version, int throttleTimeMs, Errors error, List<DelegationToken> tokens) {
         super(ApiKeys.DESCRIBE_DELEGATION_TOKEN);
         List<DescribedDelegationToken> describedDelegationTokenList = tokens
             .stream()
-            .map(dt -> new DescribedDelegationToken()
-                .setTokenId(dt.tokenInfo().tokenId())
-                .setPrincipalType(dt.tokenInfo().owner().getPrincipalType())
-                .setPrincipalName(dt.tokenInfo().owner().getName())
-                .setIssueTimestamp(dt.tokenInfo().issueTimestamp())
-                .setMaxTimestamp(dt.tokenInfo().maxTimestamp())
-                .setExpiryTimestamp(dt.tokenInfo().expiryTimestamp())
-                .setHmac(dt.hmac())
-                .setRenewers(dt.tokenInfo().renewers()
-                    .stream()
-                    .map(r -> new DescribedDelegationTokenRenewer().setPrincipalName(r.getName()).setPrincipalType(r.getPrincipalType()))
-                    .collect(Collectors.toList())))
+            .map(dt -> {
+                DescribedDelegationToken ddt = new DescribedDelegationToken()
+                    .setTokenId(dt.tokenInfo().tokenId())
+                    .setPrincipalType(dt.tokenInfo().owner().getPrincipalType())
+                    .setPrincipalName(dt.tokenInfo().owner().getName())
+                    .setIssueTimestamp(dt.tokenInfo().issueTimestamp())
+                    .setMaxTimestamp(dt.tokenInfo().maxTimestamp())
+                    .setExpiryTimestamp(dt.tokenInfo().expiryTimestamp())
+                    .setHmac(dt.hmac())
+                    .setRenewers(dt.tokenInfo().renewers()
+                        .stream()
+                        .map(r -> new DescribedDelegationTokenRenewer().setPrincipalName(r.getName()).setPrincipalType(r.getPrincipalType()))
+                        .collect(Collectors.toList()));
+                if (version > 2) {
+                    ddt.setTokenRequesterPrincipalType(dt.tokenInfo().tokenRequester().getPrincipalType())
+                        .setTokenRequesterPrincipalName(dt.tokenInfo().tokenRequester().getName());
+                }
+                return ddt;
+            })
             .collect(Collectors.toList());
 
         this.data = new DescribeDelegationTokenResponseData()
@@ -60,8 +66,8 @@ public class DescribeDelegationTokenResponse extends AbstractResponse {
             .setTokens(describedDelegationTokenList);
     }
 
-    public DescribeDelegationTokenResponse(int throttleTimeMs, Errors error) {
-        this(throttleTimeMs, error, new ArrayList<>());
+    public DescribeDelegationTokenResponse(int version, int throttleTimeMs, Errors error) {
+        this(version, throttleTimeMs, error, new ArrayList<>());
     }
 
     public DescribeDelegationTokenResponse(DescribeDelegationTokenResponseData data) {
@@ -69,9 +75,9 @@ public class DescribeDelegationTokenResponse extends AbstractResponse {
         this.data = data;
     }
 
-    public static DescribeDelegationTokenResponse parse(ByteBuffer buffer, short version) {
+    public static DescribeDelegationTokenResponse parse(Readable readable, short version) {
         return new DescribeDelegationTokenResponse(new DescribeDelegationTokenResponseData(
-            new ByteBufferAccessor(buffer), version));
+            readable, version));
     }
 
     @Override
@@ -89,6 +95,11 @@ public class DescribeDelegationTokenResponse extends AbstractResponse {
         return data.throttleTimeMs();
     }
 
+    @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
+    }
+
     public Errors error() {
         return Errors.forCode(data.errorCode());
     }
@@ -99,6 +110,7 @@ public class DescribeDelegationTokenResponse extends AbstractResponse {
             .map(ddt -> new DelegationToken(new TokenInformation(
                 ddt.tokenId(),
                 new KafkaPrincipal(ddt.principalType(), ddt.principalName()),
+                new KafkaPrincipal(ddt.tokenRequesterPrincipalType(), ddt.tokenRequesterPrincipalName()),
                 ddt.renewers()
                     .stream()
                     .map(ddtr -> new KafkaPrincipal(ddtr.principalType(), ddtr.principalName()))
@@ -114,5 +126,16 @@ public class DescribeDelegationTokenResponse extends AbstractResponse {
     @Override
     public boolean shouldClientThrottle(short version) {
         return version >= 1;
+    }
+
+    // Do not print tokenId and Hmac, overwrite a temp copy of the data with empty content
+    @Override
+    public String toString() {
+        DescribeDelegationTokenResponseData tempData = data.duplicate();
+        tempData.tokens().forEach(token -> {
+            token.setTokenId("REDACTED");
+            token.setHmac(new byte[0]);
+        });
+        return tempData.toString();
     }
 }

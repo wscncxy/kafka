@@ -24,7 +24,6 @@ import org.apache.kafka.connect.util.ConnectorTaskId;
 import org.apache.kafka.connect.util.Table;
 
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -33,6 +32,9 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+/**
+ * An implementation of StatusBackingStore that stores statuses in-memory.
+ */
 public class MemoryStatusBackingStore implements StatusBackingStore {
     private final Table<String, Integer, TaskStatus> tasks;
     private final Map<String, ConnectorStatus> connectors;
@@ -116,8 +118,8 @@ public class MemoryStatusBackingStore implements StatusBackingStore {
     public Collection<TopicStatus> getAllTopics(String connector) {
         ConcurrentMap<String, TopicStatus> activeTopics = topics.get(Objects.requireNonNull(connector));
         return activeTopics != null
-               ? Collections.unmodifiableCollection(activeTopics.values())
-               : Collections.emptySet();
+               ? Set.copyOf(activeTopics.values())
+               : Set.of();
     }
 
     @Override

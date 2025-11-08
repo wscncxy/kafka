@@ -17,11 +17,13 @@
 
 package org.apache.kafka.common.protocol;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.kafka.common.protocol.types.RawTaggedField;
 import org.apache.kafka.common.utils.Utils;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -29,6 +31,11 @@ import java.util.List;
 
 
 public final class MessageUtil {
+
+    public static final long UNSIGNED_INT_MAX = 4294967295L;
+
+    public static final int UNSIGNED_SHORT_MAX = 65535;
+
     /**
      * Copy a byte buffer into an array.  This will not affect the buffer's
      * position or mark.
@@ -87,9 +94,18 @@ public final class MessageUtil {
 
     public static int jsonNodeToUnsignedShort(JsonNode node, String about) {
         int value = jsonNodeToInt(node, about);
-        if (value < 0 || value > 65535) {
+        if (value < 0 || value > UNSIGNED_SHORT_MAX) {
             throw new RuntimeException(about + ": value " + value +
                 " does not fit in a 16-bit unsigned integer.");
+        }
+        return value;
+    }
+
+    public static long jsonNodeToUnsignedInt(JsonNode node, String about) {
+        long value = jsonNodeToLong(node, about);
+        if (value < 0 || value > UNSIGNED_INT_MAX) {
+            throw new RuntimeException(about + ": value " + value +
+                    " does not fit in a 32-bit unsigned integer.");
         }
         return value;
     }
@@ -147,14 +163,15 @@ public final class MessageUtil {
     }
 
     public static byte[] jsonNodeToBinary(JsonNode node, String about) {
-        if (!node.isBinary()) {
-            throw new RuntimeException(about + ": expected Base64-encoded binary data.");
-        }
         try {
             byte[] value = node.binaryValue();
+            if (value == null) {
+                throw new IllegalArgumentException(about + ": expected Base64-encoded binary data.");
+            }
+
             return value;
         } catch (IOException e) {
-            throw new RuntimeException(about + ": unable to retrieve Base64-encoded binary data", e);
+            throw new UncheckedIOException(about + ": unable to retrieve Base64-encoded binary data", e);
         }
     }
 
@@ -187,13 +204,13 @@ public final class MessageUtil {
         }
     }
 
-    public static ByteBuffer toByteBuffer(final Message message, final short version) {
+    public static ByteBufferAccessor toByteBufferAccessor(final Message message, final short version) {
         ObjectSerializationCache cache = new ObjectSerializationCache();
         int messageSize = message.size(cache, version);
         ByteBufferAccessor bytes = new ByteBufferAccessor(ByteBuffer.allocate(messageSize));
         message.write(bytes, cache, version);
         bytes.flip();
-        return bytes.buffer();
+        return bytes;
     }
 
     public static ByteBuffer toVersionPrefixedByteBuffer(final short version, final Message message) {
@@ -208,11 +225,38 @@ public final class MessageUtil {
 
     public static byte[] toVersionPrefixedBytes(final short version, final Message message) {
         ByteBuffer buffer = toVersionPrefixedByteBuffer(version, message);
-        // take the inner array directly if it is full with data
+        // take the inner array directly if it is full of data.
         if (buffer.hasArray() &&
-                buffer.arrayOffset() == 0 &&
-                buffer.position() == 0 &&
-                buffer.limit() == buffer.array().length) return buffer.array();
+            buffer.arrayOffset() == 0 &&
+            buffer.position() == 0 &&
+            buffer.limit() == buffer.array().length) return buffer.array();
+        else return Utils.toArray(buffer);
+    }
+
+    public static ByteBuffer toCoordinatorTypePrefixedByteBuffer(final ApiMessage message) {
+        if (message.apiKey() < 0) {
+            throw new IllegalArgumentException("Cannot serialize a message without an api key.");
+        }
+        if (message.highestSupportedVersion() != 0 || message.lowestSupportedVersion() != 0) {
+            throw new IllegalArgumentException("Cannot serialize a message with a different version than 0.");
+        }
+
+        ObjectSerializationCache cache = new ObjectSerializationCache();
+        int messageSize = message.size(cache, (short) 0);
+        ByteBufferAccessor bytes = new ByteBufferAccessor(ByteBuffer.allocate(messageSize + 2));
+        bytes.writeShort(message.apiKey());
+        message.write(bytes, cache, (short) 0);
+        bytes.flip();
+        return bytes.buffer();
+    }
+
+    public static byte[] toCoordinatorTypePrefixedBytes(final ApiMessage message) {
+        ByteBuffer buffer = toCoordinatorTypePrefixedByteBuffer(message);
+        // take the inner array directly if it is full of data.
+        if (buffer.hasArray() &&
+            buffer.arrayOffset() == 0 &&
+            buffer.position() == 0 &&
+            buffer.limit() == buffer.array().length) return buffer.array();
         else return Utils.toArray(buffer);
     }
 }

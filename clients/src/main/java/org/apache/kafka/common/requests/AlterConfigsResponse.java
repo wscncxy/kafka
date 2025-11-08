@@ -20,10 +20,9 @@ package org.apache.kafka.common.requests;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.message.AlterConfigsResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.protocol.Readable;
 
-import java.nio.ByteBuffer;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -56,12 +55,17 @@ public class AlterConfigsResponse extends AbstractResponse {
     }
 
     @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
+    }
+
+    @Override
     public AlterConfigsResponseData data() {
         return data;
     }
 
-    public static AlterConfigsResponse parse(ByteBuffer buffer, short version) {
-        return new AlterConfigsResponse(new AlterConfigsResponseData(new ByteBufferAccessor(buffer), version));
+    public static AlterConfigsResponse parse(Readable readable, short version) {
+        return new AlterConfigsResponse(new AlterConfigsResponseData(readable, version));
     }
 
     @Override

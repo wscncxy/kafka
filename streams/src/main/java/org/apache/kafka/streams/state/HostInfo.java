@@ -16,19 +16,19 @@
  */
 package org.apache.kafka.streams.state;
 
-import static org.apache.kafka.common.utils.Utils.getHost;
-import static org.apache.kafka.common.utils.Utils.getPort;
-
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.processor.internals.StreamsPartitionAssignor;
 
+import static org.apache.kafka.common.utils.Utils.getHost;
+import static org.apache.kafka.common.utils.Utils.getPort;
+
 /**
  * Represents a user defined endpoint in a {@link org.apache.kafka.streams.KafkaStreams} application.
  * Instances of this class can be obtained by calling one of:
- *  {@link KafkaStreams#allMetadata()}
- *  {@link KafkaStreams#allMetadataForStore(String)}
+ *  {@link KafkaStreams#metadataForAllStreamsClients()}
+ *  {@link KafkaStreams#streamsMetadataForStore(String)}
  *
  *  The HostInfo is constructed during Partition Assignment
  *  see {@link StreamsPartitionAssignor}

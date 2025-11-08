@@ -18,9 +18,11 @@
 package org.apache.kafka.clients.admin;
 
 import org.apache.kafka.clients.admin.ConfigEntry.ConfigType;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.List;
 
 import static java.util.Arrays.asList;
@@ -61,15 +63,15 @@ public class ConfigTest {
     public void shouldImplementEqualsProperly() {
         assertEquals(config, config);
         assertEquals(config, new Config(config.entries()));
-        assertNotEquals(new Config(asList(E1)), config);
-        assertNotEquals(config, "this");
+        assertNotEquals(new Config(Collections.singletonList(E1)), config);
+        assertNotEquals("this", config);
     }
 
     @Test
     public void shouldImplementHashCodeProperly() {
         assertEquals(config.hashCode(), config.hashCode());
         assertEquals(config.hashCode(), new Config(config.entries()).hashCode());
-        assertNotEquals(new Config(asList(E1)).hashCode(), config.hashCode());
+        assertNotEquals(new Config(Collections.singletonList(E1)).hashCode(), config.hashCode());
     }
 
     @Test
@@ -81,5 +83,20 @@ public class ConfigTest {
     public static ConfigEntry newConfigEntry(String name, String value, ConfigEntry.ConfigSource source, boolean isSensitive,
                                              boolean isReadOnly, List<ConfigEntry.ConfigSynonym> synonyms) {
         return new ConfigEntry(name, value, source, isSensitive, isReadOnly, synonyms, ConfigType.UNKNOWN, null);
+    }
+
+    @Test
+    public void testHashCodeAndEqualsWithNull() {
+        ConfigEntry ce0 = new ConfigEntry("abc", null, null, false, false, null, null, null);
+        ConfigEntry ce1 = new ConfigEntry("abc", null, null, false, false, null, null, null);
+        assertEquals(ce0, ce1);
+        assertEquals(ce0.hashCode(), ce1.hashCode());
+    }
+
+    @Test
+    public void testEquals() {
+        ConfigEntry ce0 = new ConfigEntry("abc", null, ConfigEntry.ConfigSource.DEFAULT_CONFIG, false, false, null, null, null);
+        ConfigEntry ce1 = new ConfigEntry("abc", null, ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG, false, false, null, null, null);
+        assertNotEquals(ce0, ce1);
     }
 }

@@ -17,21 +17,19 @@
 
 package kafka.server
 
+import kafka.api.IntegrationTestHarness
+import kafka.network.SocketServer
+import org.apache.kafka.common.network.ListenerName
+import org.apache.kafka.common.protocol.{ApiKeys, ByteBufferAccessor}
+import org.apache.kafka.common.requests.{AbstractRequest, AbstractResponse, RequestHeader, ResponseHeader}
+import org.apache.kafka.common.utils.Utils
+import org.apache.kafka.metadata.BrokerState
+import org.apache.kafka.server.config.ServerConfigs
+
 import java.io.{DataInputStream, DataOutputStream}
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.Properties
-
-import kafka.api.IntegrationTestHarness
-import kafka.network.SocketServer
-import kafka.utils.NotNothing
-import org.apache.kafka.common.network.ListenerName
-import org.apache.kafka.common.protocol.ApiKeys
-import org.apache.kafka.common.requests.{AbstractRequest, AbstractResponse, RequestHeader, RequestTestUtils, ResponseHeader}
-import org.apache.kafka.common.utils.Utils
-import org.apache.kafka.metadata.BrokerState
-
-import scala.annotation.nowarn
 import scala.collection.Seq
 import scala.reflect.ClassTag
 
@@ -46,35 +44,34 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
 
   override def modifyConfigs(props: Seq[Properties]): Unit = {
     props.foreach { p =>
-      p.put(KafkaConfig.ControlledShutdownEnableProp, "false")
+      p.put(ServerConfigs.CONTROLLED_SHUTDOWN_ENABLE_CONFIG, "false")
       brokerPropertyOverrides(p)
     }
   }
 
   def anySocketServer: SocketServer = {
-    servers.find { server =>
-      val state = server.brokerState
+    brokers.find { broker =>
+      val state = broker.brokerState
       state != BrokerState.NOT_RUNNING && state != BrokerState.SHUTTING_DOWN
     }.map(_.socketServer).getOrElse(throw new IllegalStateException("No live broker is available"))
   }
 
-  def controllerSocketServer: SocketServer = {
-    servers.find { server =>
-      server.kafkaController.isActive
-    }.map(_.socketServer).getOrElse(throw new IllegalStateException("No controller broker is available"))
-  }
+  def controllerSocketServer: SocketServer = controllerServer.socketServer
 
-  def notControllerSocketServer: SocketServer = {
-    servers.find { server =>
-      !server.kafkaController.isActive
-    }.map(_.socketServer).getOrElse(throw new IllegalStateException("No non-controller broker is available"))
-  }
+  def notControllerSocketServer: SocketServer = anySocketServer
 
   def brokerSocketServer(brokerId: Int): SocketServer = {
-    servers.find { server =>
-      server.config.brokerId == brokerId
+    brokers.find { broker =>
+      broker.config.brokerId == brokerId
     }.map(_.socketServer).getOrElse(throw new IllegalStateException(s"Could not find broker with id $brokerId"))
   }
+
+  /**
+   * Return the socket server where admin request to be sent.
+   *
+   * KRaft clusters that is any broker as the broker will forward the request to the active controller.
+   */
+  def adminSocketServer: SocketServer = anySocketServer
 
   def connect(socketServer: SocketServer = anySocketServer,
               listenerName: ListenerName = listenerName): Socket = {
@@ -89,7 +86,7 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
   }
 
   def receive[T <: AbstractResponse](socket: Socket, apiKey: ApiKeys, version: Short)
-                                    (implicit classTag: ClassTag[T], @nowarn("cat=unused") nn: NotNothing[T]): T = {
+                                    (implicit classTag: ClassTag[T]): T = {
     val incoming = new DataInputStream(socket.getInputStream)
     val len = incoming.readInt()
 
@@ -99,7 +96,7 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
     val responseBuffer = ByteBuffer.wrap(responseBytes)
     ResponseHeader.parse(responseBuffer, apiKey.responseHeaderVersion(version))
 
-    AbstractResponse.parseResponse(apiKey, responseBuffer, version) match {
+    AbstractResponse.parseResponse(apiKey, new ByteBufferAccessor(responseBuffer), version) match {
       case response: T => response
       case response =>
         throw new ClassCastException(s"Expected response with type ${classTag.runtimeClass}, but found ${response.getClass}")
@@ -110,7 +107,7 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
                                             socket: Socket,
                                             clientId: String = "client-id",
                                             correlationId: Option[Int] = None)
-                                           (implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
+                                           (implicit classTag: ClassTag[T]): T = {
     send(request, socket, clientId, correlationId)
     receive[T](socket, request.apiKey, request.version)
   }
@@ -118,7 +115,7 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
   def connectAndReceive[T <: AbstractResponse](request: AbstractRequest,
                                                destination: SocketServer = anySocketServer,
                                                listenerName: ListenerName = listenerName)
-                                              (implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
+                                              (implicit classTag: ClassTag[T]): T = {
     val socket = connect(destination, listenerName)
     try sendAndReceive[T](request, socket)
     finally socket.close()
@@ -136,7 +133,7 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
   }
 
   def sendWithHeader(request: AbstractRequest, header: RequestHeader, socket: Socket): Unit = {
-    val serializedBytes = Utils.toArray(RequestTestUtils.serializeRequestWithHeader(header, request))
+    val serializedBytes = Utils.toArray(request.serializeWithHeader(header))
     sendRequest(socket, serializedBytes)
   }
 

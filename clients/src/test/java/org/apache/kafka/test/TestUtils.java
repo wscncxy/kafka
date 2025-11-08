@@ -16,28 +16,38 @@
  */
 package org.apache.kafka.test;
 
+import org.apache.kafka.clients.MetadataSnapshot;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.feature.Features;
+import org.apache.kafka.common.feature.SupportedVersionRange;
+import org.apache.kafka.common.message.ApiMessageType;
+import org.apache.kafka.common.message.ApiVersionsResponseData;
 import org.apache.kafka.common.network.NetworkReceive;
 import org.apache.kafka.common.network.Send;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.UnalignedRecords;
+import org.apache.kafka.common.requests.ApiVersionsResponse;
 import org.apache.kafka.common.requests.ByteBufferChannel;
+import org.apache.kafka.common.requests.MetadataResponse.PartitionMetadata;
 import org.apache.kafka.common.requests.RequestHeader;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.utils.Exit;
 import org.apache.kafka.common.utils.Utils;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -55,8 +65,11 @@ import java.util.Properties;
 import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -65,7 +78,6 @@ import java.util.regex.Pattern;
 import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -118,6 +130,63 @@ public class TestUtils {
     }
 
     /**
+     * Test utility function to get MetadataSnapshot with configured nodes and partitions.
+     * @param nodes number of nodes in the cluster
+     * @param topicPartitionCounts map of topic -> # of partitions
+     * @return a MetadataSnapshot with number of nodes, partitions as per the input.
+     */
+
+    public static MetadataSnapshot metadataSnapshotWith(final int nodes, final Map<String, Integer> topicPartitionCounts) {
+        final Node[] ns = new Node[nodes];
+        Map<Integer, Node> nodesById = new HashMap<>();
+        for (int i = 0; i < nodes; i++) {
+            ns[i] = new Node(i, "localhost", 1969);
+            nodesById.put(ns[i].id(), ns[i]);
+        }
+        final List<PartitionMetadata> partsMetadatas = new ArrayList<>();
+        for (final Map.Entry<String, Integer> topicPartition : topicPartitionCounts.entrySet()) {
+            final String topic = topicPartition.getKey();
+            final int partitions = topicPartition.getValue();
+            for (int i = 0; i < partitions; i++) {
+                TopicPartition tp = new TopicPartition(topic, partitions);
+                Node node = ns[i % ns.length];
+                partsMetadatas.add(new PartitionMetadata(Errors.NONE, tp, Optional.of(node.id()), Optional.empty(), null, null, null));
+            }
+        }
+        return new MetadataSnapshot("kafka-cluster", nodesById, partsMetadatas, Collections.emptySet(), Collections.emptySet(), Collections.emptySet(), null, Collections.emptyMap());
+    }
+
+    /**
+     * Asserts that there are no leaked threads with a specified name prefix and daemon status.
+     * This method checks all threads in the JVM, filters them by the provided thread name prefix
+     * and daemon status, and verifies that no matching threads are alive.
+     * Use the {@link #waitForCondition(TestCondition, String) waitForCondition} to retry the check at a regular interval
+     * until either no matching threads are found or the timeout is exceeded.
+     * If any matching, alive threads are found after the timeout has elapsed, the assertion will fail.
+     *
+     * @param threadName The prefix of the thread names to check. Only threads whose names
+     *                   start with this prefix will be considered.
+     * @param isDaemon   The daemon status to check. Only threads with the specified
+     *                   daemon status (either true for daemon threads or false for non-daemon threads)
+     *                   will be considered.
+     *
+     * @throws AssertionError If any thread with the specified name prefix and daemon status are found after the timeout. 
+     */
+    public static void assertNoLeakedThreadsWithNameAndDaemonStatus(String threadName, boolean isDaemon) throws InterruptedException {
+        waitForCondition(() -> Thread.getAllStackTraces().keySet().stream()
+                .noneMatch(t -> t.isDaemon() == isDaemon && t.isAlive() && t.getName().startsWith(threadName)), String.format("Thread leak detected: %s", threadName));
+    }
+
+    /**
+     * Test utility function to get MetadataSnapshot of cluster with configured, and 0 partitions.
+     * @param nodes number of nodes in the cluster.
+     * @return a MetadataSnapshot of cluster with number of nodes in the input.
+     */
+    public static MetadataSnapshot metadataSnapshotWith(int nodes) {
+        return metadataSnapshotWith(nodes, new HashMap<>());
+    }
+
+    /**
      * Generate an array of random bytes
      *
      * @param size The size of the array
@@ -142,14 +211,33 @@ public class TestUtils {
     }
 
     /**
+     * Select a random element from collections
+     *
+     * @param elements A collection we can select
+     * @return A element from collection
+     */
+    public static <T> T randomSelect(final Collection<T> elements) {
+        List<T> elementsCopy = new ArrayList<>(elements);
+        return elementsCopy.get(SEEDED_RANDOM.nextInt(elementsCopy.size()));
+    }
+
+    /**
+     * Create an empty file in the default temporary-file directory, using the given prefix and suffix
+     * to generate its name.
+     * @throws IOException
+     */
+    public static File tempFile(final String prefix, final String suffix) throws IOException {
+        final File file = Files.createTempFile(prefix, suffix).toFile();
+        file.deleteOnExit();
+        return file;
+    }
+
+    /**
      * Create an empty file in the default temporary-file directory, using `kafka` as the prefix and `tmp` as the
      * suffix to generate its name.
      */
     public static File tempFile() throws IOException {
-        final File file = File.createTempFile("kafka", ".tmp");
-        file.deleteOnExit();
-
-        return file;
+        return tempFile("kafka", ".tmp");
     }
 
     /**
@@ -158,10 +246,7 @@ public class TestUtils {
      */
     public static File tempFile(final String contents) throws IOException {
         final File file = tempFile();
-        final FileWriter writer = new FileWriter(file);
-        writer.write(contents);
-        writer.close();
-
+        Files.write(file.toPath(), contents.getBytes(StandardCharsets.UTF_8));
         return file;
     }
 
@@ -185,6 +270,22 @@ public class TestUtils {
     }
 
     /**
+     * Create a temporary directory under the given root directory.
+     * The root directory is removed on JVM exit if it doesn't already exist
+     * when this function is invoked.
+     *
+     * @param root path to create temporary directory under
+     * @return the temporary directory created within {@code root}
+     */
+    public static File tempRelativeDir(String root) {
+        File rootFile = new File(root);
+        if (rootFile.mkdir()) {
+            rootFile.deleteOnExit();
+        }
+        return tempDirectory(rootFile.toPath(), null);
+    }
+
+    /**
      * Create a temporary relative directory in the specified parent directory with the given prefix.
      *
      * @param parent The parent folder path name, if null using the default temporary-file directory
@@ -199,7 +300,6 @@ public class TestUtils {
         } catch (final IOException ex) {
             throw new RuntimeException("Failed to create a temp dir", ex);
         }
-        file.deleteOnExit();
 
         Exit.addShutdownHook("delete-temp-file-shutdown-hook", () -> {
             try {
@@ -210,6 +310,23 @@ public class TestUtils {
         });
 
         return file;
+    }
+
+    /**
+     * Create a random log directory in the format <string>-<int> used for Kafka partition logs.
+     * It is the responsibility of the caller to set up a shutdown hook for deletion of the directory.
+     */
+    public static File randomPartitionLogDir(File parentDir) {
+        int attempts = 1000;
+        while (attempts > 0) {
+            File f = new File(parentDir, "kafka-" + RANDOM.nextInt(1000000));
+            if (f.mkdir()) {
+                f.deleteOnExit();
+                return f;
+            }
+            attempts--;
+        }
+        throw new RuntimeException("Failed to create directory after 1000 attempts");
     }
 
     public static Properties producerConfig(final String bootstrapServers,
@@ -227,6 +344,14 @@ public class TestUtils {
 
     public static Properties producerConfig(final String bootstrapServers, final Class<?> keySerializer, final Class<?> valueSerializer) {
         return producerConfig(bootstrapServers, keySerializer, valueSerializer, new Properties());
+    }
+
+    public static Properties requiredConsumerConfig() {
+        final Properties consumerConfig = new Properties();
+        consumerConfig.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9091");
+        consumerConfig.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        consumerConfig.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        return consumerConfig;
     }
 
     public static Properties consumerConfig(final String bootstrapServers,
@@ -298,7 +423,7 @@ public class TestUtils {
      * avoid transient failures due to slow or overloaded machines.
      */
     public static void waitForCondition(final TestCondition testCondition, final long maxWaitMs, Supplier<String> conditionDetailsSupplier) throws InterruptedException {
-        waitForCondition(testCondition, DEFAULT_POLL_INTERVAL_MS, maxWaitMs, conditionDetailsSupplier);
+        waitForCondition(testCondition, maxWaitMs, DEFAULT_POLL_INTERVAL_MS, conditionDetailsSupplier);
     }
 
     /**
@@ -310,11 +435,11 @@ public class TestUtils {
      */
     public static void waitForCondition(
         final TestCondition testCondition,
-        final long pollIntervalMs,
         final long maxWaitMs,
+        final long pollIntervalMs,
         Supplier<String> conditionDetailsSupplier
     ) throws InterruptedException {
-        retryOnExceptionWithTimeout(pollIntervalMs, maxWaitMs, () -> {
+        retryOnExceptionWithTimeout(maxWaitMs, pollIntervalMs, () -> {
             String conditionDetailsSupplied = conditionDetailsSupplier != null ? conditionDetailsSupplier.get() : null;
             String conditionDetails = conditionDetailsSupplied != null ? conditionDetailsSupplied : "";
             assertTrue(testCondition.conditionMet(),
@@ -333,7 +458,7 @@ public class TestUtils {
      */
     public static void retryOnExceptionWithTimeout(final long timeoutMs,
                                                    final ValuelessCallable runnable) throws InterruptedException {
-        retryOnExceptionWithTimeout(DEFAULT_POLL_INTERVAL_MS, timeoutMs, runnable);
+        retryOnExceptionWithTimeout(timeoutMs, DEFAULT_POLL_INTERVAL_MS, runnable);
     }
 
     /**
@@ -345,7 +470,7 @@ public class TestUtils {
      * @throws InterruptedException if the current thread is interrupted while waiting for {@code runnable} to complete successfully.
      */
     public static void retryOnExceptionWithTimeout(final ValuelessCallable runnable) throws InterruptedException {
-        retryOnExceptionWithTimeout(DEFAULT_POLL_INTERVAL_MS, DEFAULT_MAX_WAIT_MS, runnable);
+        retryOnExceptionWithTimeout(DEFAULT_MAX_WAIT_MS, DEFAULT_POLL_INTERVAL_MS, runnable);
     }
 
     /**
@@ -353,13 +478,13 @@ public class TestUtils {
      * {@link AssertionError}s, or for the given timeout to expire. If the timeout expires then the
      * last exception or assertion failure will be thrown thus providing context for the failure.
      *
-     * @param pollIntervalMs the interval in milliseconds to wait between invoking {@code runnable}.
      * @param timeoutMs the total time in milliseconds to wait for {@code runnable} to complete successfully.
+     * @param pollIntervalMs the interval in milliseconds to wait between invoking {@code runnable}.
      * @param runnable the code to attempt to execute successfully.
      * @throws InterruptedException if the current thread is interrupted while waiting for {@code runnable} to complete successfully.
      */
-    public static void retryOnExceptionWithTimeout(final long pollIntervalMs,
-                                                   final long timeoutMs,
+    public static void retryOnExceptionWithTimeout(final long timeoutMs,
+                                                   final long pollIntervalMs,
                                                    final ValuelessCallable runnable) throws InterruptedException {
         final long expectedEnd = System.currentTimeMillis() + timeoutMs;
 
@@ -390,7 +515,7 @@ public class TestUtils {
         assertNotNull(clusterId);
 
         // Base 64 encoded value is 22 characters
-        assertEquals(clusterId.length(), 22);
+        assertEquals(22, clusterId.length());
 
         Pattern clusterIdPattern = Pattern.compile("[a-zA-Z0-9_\\-]+");
         Matcher matcher = clusterIdPattern.matcher(clusterId);
@@ -401,7 +526,7 @@ public class TestUtils {
         byte[] decodedUuid = Base64.getDecoder().decode(originalClusterId);
 
         // We expect 16 bytes, same as the input UUID.
-        assertEquals(decodedUuid.length, 16);
+        assertEquals(16, decodedUuid.length);
 
         //Check if it can be converted back to a UUID.
         try {
@@ -440,10 +565,6 @@ public class TestUtils {
         return list;
     }
 
-    public static <T> Set<T> toSet(Collection<T> collection) {
-        return new HashSet<>(collection);
-    }
-
     public static ByteBuffer toBuffer(Send send) {
         ByteBufferChannel channel = new ByteBufferChannel(send.size());
         try {
@@ -459,53 +580,44 @@ public class TestUtils {
         return toBuffer(records.toSend());
     }
 
-    public static Set<TopicPartition> generateRandomTopicPartitions(int numTopic, int numPartitionPerTopic) {
-        Set<TopicPartition> tps = new HashSet<>();
-        for (int i = 0; i < numTopic; i++) {
-            String topic = randomString(32);
-            for (int j = 0; j < numPartitionPerTopic; j++) {
-                tps.add(new TopicPartition(topic, j));
-            }
-        }
-        return tps;
-    }
-
     /**
-     * Assert that a future raises an expected exception cause type. Return the exception cause
-     * if the assertion succeeds; otherwise raise AssertionError.
+     * Assert that a future raises an expected exception cause type.
+     * This method will wait for the future to complete or timeout(15000 milliseconds).
      *
-     * @param future The future to await
-     * @param exceptionCauseClass Class of the expected exception cause
      * @param <T> Exception cause type parameter
+     * @param exceptionCauseClass Class of the expected exception cause
+     * @param future The future to await
      * @return The caught exception cause
      */
-    public static <T extends Throwable> T assertFutureThrows(Future<?> future, Class<T> exceptionCauseClass) {
-        ExecutionException exception = assertThrows(ExecutionException.class, future::get);
-        assertTrue(exceptionCauseClass.isInstance(exception.getCause()),
-            "Unexpected exception cause " + exception.getCause());
-        return exceptionCauseClass.cast(exception.getCause());
+    public static <T extends Throwable> T assertFutureThrows(Class<T> exceptionCauseClass, Future<?> future) {
+        try {
+            future.get(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS);
+            fail("Should throw expected exception " + exceptionCauseClass.getSimpleName() + " but nothing was thrown.");
+        } catch (InterruptedException | ExecutionException | CancellationException e) {
+            Throwable cause = e instanceof ExecutionException ? e.getCause() : e;
+            // Enable strict type checking.
+            // This ensures we're testing for the exact exception type, not its subclasses.
+            assertEquals(
+                exceptionCauseClass, 
+                cause.getClass(), 
+                "Expected " + exceptionCauseClass.getSimpleName() + ", but got " + cause.getClass().getSimpleName()
+            );
+            return exceptionCauseClass.cast(cause);
+        } catch (TimeoutException e) {
+            fail("Future is not completed within " + DEFAULT_MAX_WAIT_MS + " milliseconds.");
+        } catch (Exception e) {
+            fail("Expected " + exceptionCauseClass.getSimpleName() + ", but got " + e.getClass().getSimpleName());
+        }
+        return null;
     }
 
     public static <T extends Throwable> void assertFutureThrows(
-        Future<?> future,
         Class<T> expectedCauseClassApiException,
+        Future<?> future,
         String expectedMessage
     ) {
-        T receivedException = assertFutureThrows(future, expectedCauseClassApiException);
+        T receivedException = assertFutureThrows(expectedCauseClassApiException, future);
         assertEquals(expectedMessage, receivedException.getMessage());
-    }
-
-    public static void assertFutureError(Future<?> future, Class<? extends Throwable> exceptionClass)
-        throws InterruptedException {
-        try {
-            future.get();
-            fail("Expected a " + exceptionClass.getSimpleName() + " exception, but got success.");
-        } catch (ExecutionException ee) {
-            Throwable cause = ee.getCause();
-            assertEquals(exceptionClass, cause.getClass(),
-                "Expected a " + exceptionClass.getSimpleName() + " exception, but got " +
-                    cause.getClass().getSimpleName());
-        }
     }
 
     public static ApiKeys apiKeyFrom(NetworkReceive networkReceive) {
@@ -575,5 +687,59 @@ public class TestUtils {
         iterator2.forEachRemaining(expectedSegmentsSet::add);
 
         return allSegmentsSet.equals(expectedSegmentsSet);
+    }
+
+    public static ApiVersionsResponse defaultApiVersionsResponse(
+            ApiMessageType.ListenerType listenerType
+    ) {
+        return defaultApiVersionsResponse(0, listenerType);
+    }
+
+    public static ApiVersionsResponse defaultApiVersionsResponse(
+            int throttleTimeMs,
+            ApiMessageType.ListenerType listenerType
+    ) {
+        return createApiVersionsResponse(
+                throttleTimeMs,
+                ApiVersionsResponse.filterApis(listenerType, true, true),
+                Features.emptySupportedFeatures(),
+                false
+        );
+    }
+
+    public static ApiVersionsResponse defaultApiVersionsResponse(
+            int throttleTimeMs,
+            ApiMessageType.ListenerType listenerType,
+            boolean enableUnstableLastVersion
+    ) {
+        return createApiVersionsResponse(
+                throttleTimeMs,
+                ApiVersionsResponse.filterApis(listenerType, enableUnstableLastVersion, true),
+                Features.emptySupportedFeatures(),
+                false
+        );
+    }
+
+    public static ApiVersionsResponse createApiVersionsResponse(
+            int throttleTimeMs,
+            ApiVersionsResponseData.ApiVersionCollection apiVersions
+    ) {
+        return createApiVersionsResponse(throttleTimeMs, apiVersions, Features.emptySupportedFeatures(), false);
+    }
+
+    public static ApiVersionsResponse createApiVersionsResponse(
+            int throttleTimeMs,
+            ApiVersionsResponseData.ApiVersionCollection apiVersions,
+            Features<SupportedVersionRange> latestSupportedFeatures,
+            boolean zkMigrationEnabled
+    ) {
+        return new ApiVersionsResponse.Builder().
+            setThrottleTimeMs(throttleTimeMs).
+            setApiVersions(apiVersions).
+            setSupportedFeatures(latestSupportedFeatures).
+            setFinalizedFeatures(Collections.emptyMap()).
+            setFinalizedFeaturesEpoch(ApiVersionsResponse.UNKNOWN_FINALIZED_FEATURES_EPOCH).
+            setZkMigrationEnabled(zkMigrationEnabled).
+            build();
     }
 }

@@ -47,6 +47,7 @@ public final class Cluster {
     private final Map<Integer, Node> nodesById;
     private final ClusterResource clusterResource;
     private final Map<String, Uuid> topicIds;
+    private final Map<Uuid, String> topicNames;
 
     /**
      * Create a new cluster with the given id, nodes and partitions
@@ -184,6 +185,9 @@ public final class Cluster {
         this.availablePartitionsByTopic = Collections.unmodifiableMap(tmpAvailablePartitionsByTopic);
         this.partitionsByNode = Collections.unmodifiableMap(tmpPartitionsByNode);
         this.topicIds = Collections.unmodifiableMap(topicIds);
+        Map<Uuid, String> tmpTopicNames = new HashMap<>();
+        topicIds.forEach((key, value) -> tmpTopicNames.put(value, key));
+        this.topicNames = Collections.unmodifiableMap(tmpTopicNames);
 
         this.unauthorizedTopics = Collections.unmodifiableSet(unauthorizedTopics);
         this.invalidTopics = Collections.unmodifiableSet(invalidTopics);
@@ -242,13 +246,18 @@ public final class Cluster {
 
     /**
      * Get the node by node id if the replica for the given partition is online
-     * @param partition
-     * @param id
+     * @param partition The TopicPartition
+     * @param id The node id
      * @return the node
      */
     public Optional<Node> nodeIfOnline(TopicPartition partition, int id) {
         Node node = nodeById(id);
-        if (node != null && !Arrays.asList(partition(partition).offlineReplicas()).contains(node)) {
+        PartitionInfo partitionInfo = partition(partition);
+
+        if (node != null && partitionInfo != null &&
+            !Arrays.asList(partitionInfo.offlineReplicas()).contains(node) &&
+            Arrays.asList(partitionInfo.replicas()).contains(node)) {
+
             return Optional.of(node);
         } else {
             return Optional.empty();
@@ -354,6 +363,10 @@ public final class Cluster {
         return topicIds.getOrDefault(topic, Uuid.ZERO_UUID);
     }
 
+    public String topicName(Uuid topicId) {
+        return topicNames.get(topicId);
+    }
+
     @Override
     public String toString() {
         return "Cluster(id = " + clusterResource.clusterId() + ", nodes = " + this.nodes +
@@ -372,12 +385,13 @@ public final class Cluster {
                 Objects.equals(internalTopics, cluster.internalTopics) &&
                 Objects.equals(controller, cluster.controller) &&
                 Objects.equals(partitionsByTopicPartition, cluster.partitionsByTopicPartition) &&
-                Objects.equals(clusterResource, cluster.clusterResource);
+                Objects.equals(clusterResource, cluster.clusterResource) &&
+                Objects.equals(topicIds, cluster.topicIds);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(isBootstrapConfigured, nodes, unauthorizedTopics, invalidTopics, internalTopics, controller,
-                partitionsByTopicPartition, clusterResource);
+                partitionsByTopicPartition, clusterResource, topicIds);
     }
 }

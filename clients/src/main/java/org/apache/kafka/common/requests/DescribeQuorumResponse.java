@@ -18,15 +18,12 @@ package org.apache.kafka.common.requests;
 
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.message.DescribeQuorumResponseData;
-import org.apache.kafka.common.message.DescribeQuorumResponseData.ReplicaState;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.protocol.Readable;
 
-import java.nio.ByteBuffer;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
+import java.util.EnumMap;
 import java.util.Map;
 
 /**
@@ -37,7 +34,7 @@ import java.util.Map;
  * - {@link Errors#BROKER_NOT_AVAILABLE}
  *
  * Partition level errors:
- * - {@link Errors#INVALID_REQUEST}
+ * - {@link Errors#NOT_LEADER_OR_FOLLOWER}
  * - {@link Errors#UNKNOWN_TOPIC_OR_PARTITION}
  */
 public class DescribeQuorumResponse extends AbstractResponse {
@@ -50,7 +47,7 @@ public class DescribeQuorumResponse extends AbstractResponse {
 
     @Override
     public Map<Errors, Integer> errorCounts() {
-        Map<Errors, Integer> errors = new HashMap<>();
+        Map<Errors, Integer> errors = new EnumMap<>(Errors.class);
 
         errors.put(Errors.forCode(data.errorCode()), 1);
 
@@ -72,25 +69,43 @@ public class DescribeQuorumResponse extends AbstractResponse {
         return DEFAULT_THROTTLE_TIME;
     }
 
-    public static DescribeQuorumResponseData singletonResponse(TopicPartition topicPartition,
-                                                               int leaderId,
-                                                               int leaderEpoch,
-                                                               long highWatermark,
-                                                               List<ReplicaState> voterStates,
-                                                               List<ReplicaState> observerStates) {
+    @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        // Not supported by the response schema
+    }
+
+    public static DescribeQuorumResponseData singletonErrorResponse(
+        TopicPartition topicPartition,
+        Errors error
+    ) {
         return new DescribeQuorumResponseData()
             .setTopics(Collections.singletonList(new DescribeQuorumResponseData.TopicData()
                 .setTopicName(topicPartition.topic())
                 .setPartitions(Collections.singletonList(new DescribeQuorumResponseData.PartitionData()
-                    .setErrorCode(Errors.NONE.code())
-                    .setLeaderId(leaderId)
-                    .setLeaderEpoch(leaderEpoch)
-                    .setHighWatermark(highWatermark)
-                    .setCurrentVoters(voterStates)
-                    .setObservers(observerStates)))));
+                    .setPartitionIndex(topicPartition.partition())
+                    .setErrorCode(error.code())
+                    .setErrorMessage(error.message())))));
     }
 
-    public static DescribeQuorumResponse parse(ByteBuffer buffer, short version) {
-        return new DescribeQuorumResponse(new DescribeQuorumResponseData(new ByteBufferAccessor(buffer), version));
+
+    public static DescribeQuorumResponseData singletonResponse(
+        TopicPartition topicPartition,
+        DescribeQuorumResponseData.PartitionData partitionData,
+        DescribeQuorumResponseData.NodeCollection nodes
+    ) {
+        DescribeQuorumResponseData res = new DescribeQuorumResponseData()
+            .setTopics(Collections.singletonList(new DescribeQuorumResponseData.TopicData()
+                .setTopicName(topicPartition.topic())
+                .setPartitions(Collections.singletonList(partitionData
+                    .setPartitionIndex(topicPartition.partition())))));
+
+        if (nodes != null)
+            res.setNodes(nodes);
+
+        return res;
+    }
+
+    public static DescribeQuorumResponse parse(Readable readable, short version) {
+        return new DescribeQuorumResponse(new DescribeQuorumResponseData(readable, version));
     }
 }
